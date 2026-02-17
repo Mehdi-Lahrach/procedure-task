@@ -1,0 +1,31 @@
+PROCEDURE TASK — VERSION CHANGELOG
+====================================
+
+v2-dob-autocollapse
+-------------------
+- Added Date of Birth field (day/month/year input group) to the Applicant Details page,
+  placed between Last Name and National ID number
+- Auto-collapse document previews on page navigation: when the participant clicks Continue,
+  all open document accordions are closed and the slide-out document drawer is dismissed,
+  so the form stays in focus without requiring manual cleanup
+- Engine change: added _collapseDocumentPreviews() method called in nextPage() before
+  navigating to the next page
+
+v1-initial
+----------
+- Initial implementation of the Green Zone Vehicle Access Permit procedure
+- Full 19-page flow: consent, instructions, applicant details, eligibility assessment,
+  document uploads, vehicle details (4 pages), declaration, submission, demographics,
+  attention check, feedback, debrief, completion
+- Declarative procedure definition system (procedure_greenzone.js) with pluggable engine
+- GOV.UK Design System-inspired styling (gov.css)
+- Document reference panel: 6 fictional documents in collapsible accordions with slide-out
+  drawer viewer (zoom in/out, Ctrl+scroll, fit-to-width)
+- Section-based progress stepper (visible only during the main application flow)
+- Form validation on submit with error summary and per-field error messages
+- Behavioral tracking: per-page timing, document open/close tracking, validation error
+  counting, form response collection
+- Session persistence and resume on refresh
+- Prolific integration (PROLIFIC_PID, STUDY_ID, SESSION_ID URL parameters)
+- Server-side JSONL data storage with CSV export and researcher dashboard
+- Duplicate participation prevention
