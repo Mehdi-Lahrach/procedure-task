@@ -71,9 +71,12 @@ Renders procedure pages and manages navigation. Features:
 - **Real-time validation**: Pattern fields validate on blur with red error states
 - **Document panel**: Side panel with accordion-style document viewers, tracked open/close
 - **Document drawer**: Slide-out overlay for viewing documents with zoom controls (zoom in/out, reset, Ctrl+scroll wheel)
+- **Auto-collapse**: When the participant clicks Continue or Back, all open document accordions are closed and the slide-out drawer is dismissed automatically, keeping the form in focus
 - **Section stepper**: Configurable progress indicator showing procedure sections (e.g., "Applicant details → Eligibility → Vehicle details → Declaration → Submit"). Only visible during the procedure, hidden on consent/post-task/completion pages. Controlled via `stepperSections` config array.
 - **Progress bar**: Visual progress indicator
 - **Back navigation**: Browser back blocked; optional in-page back buttons. Page timing pauses on the current page and resumes (not restarts) on the revisited page.
+- **Date validation**: `date_group` fields get multi-level validation — missing fields, non-numeric input, range checks (month 1–12, day 1–31, year 1900–current), and real date verification (rejects impossible dates like Feb 30). All three inputs (day/month/year) get red borders on error.
+- **Conditional skip** (`skipIf`): Pages can define a skip rule (field + value + targetPageId). If the condition is met after validation, navigation jumps to the target page. Used for the eligibility decision: selecting "No" skips the rest of the application.
 - **Session persistence**: Progress (page index + form data) saved to server on every page transition. On refresh, session resumes from where the participant left off.
 - **Consent recording**: Posts consent to server when checkbox is checked
 
@@ -114,12 +117,14 @@ A fictional but realistic 19-page government application for a "Green Zone Vehic
 - **Duplicate prevention**: Resume endpoint detects already-completed sessions and returns `already_complete` flag
 - **Completion status**: Each session is classified as `complete` (all pages finished), `partial` (consent given but not finished), or `incomplete` (no consent). Drop-off page tracked for partial sessions.
 - **Event ingestion**: Batch endpoint accepting all event types → stored as JSONL files
+- **Application quality scoring**: Each submitted application is automatically checked against an answer key derived from the fictional documents (name, DOB, national ID, eligibility decision, supporting documents, vehicle registration, owner type, category, fuel type, environmental class). Distinguishes substantive errors (wrong information → rejection) from formatting errors caught during the procedure.
 - **Per-participant aggregation**: Stats and dashboard aggregate page timings and errors per-session first (one count per participant per page, not per visit)
 - **Data export**:
   - `/api/export/csv` — **Flat CSV, one row per session** with all form data, per-page timings, document stats, error counts
   - `/api/export/all/json` — Full JSON dump of all tables
   - `/api/export/{table}` — Individual table export (JSON or CSV with `&format=csv`)
-- **Dashboard**: `/dashboard` — Live stats with color-coded status cards, page-by-page timing/error breakdown, document interaction rates, drop-off analysis
+- **Ineligible session handling**: Sessions where the participant selected "not eligible" are flagged (`ineligible_skipped=yes` in CSV) and excluded from main timing averages
+- **Dashboard**: `/dashboard` — Live stats with color-coded status cards (including ineligible count), application quality scoring section (rejection rate + per-field error table), page-by-page timing and validation error breakdown, document interaction rates, drop-off analysis
 - **Authentication**: All export/stats endpoints require `?key=research2025` (configurable via `EXPORT_KEY` env var)
 
 ---
@@ -150,6 +155,7 @@ The `/api/export/csv` endpoint produces **one row per session** with columns:
 - **Per-page timing**: `time_{pageId}_ms` for each page
 - **Per-document**: `doc_{docId}_opens`, `doc_{docId}_totalMs` for each document
 - **Per-page errors**: `errors_{pageId}` for each page
+- **Application quality scoring**: `quality_errors` (count of substantive errors), `quality_would_reject` (`yes`/`no`), `quality_error_fields` (semicolon-separated list), `quality_error_details` (submitted vs. expected for each error), `ineligible_skipped` (`yes`/`no`)
 - **Form responses**: One column per form field name, values flattened across pages
 
 ---
@@ -266,7 +272,7 @@ The panel uses `<details>` elements with class `document-accordion` and `data-do
 - `GET /api/export/all/json` — Full JSON dump
 - `GET /api/export/sessions` — Sessions table
 - `GET /api/export/{table}` — Individual table (append `&format=csv` for CSV)
-- `GET /api/stats` — Aggregated statistics
+- `GET /api/stats` — Aggregated statistics (includes `quality_submitted`, `quality_rejected`, `quality_rejection_rate`, `quality_by_field` with per-field error counts and rates)
 - `GET /dashboard` — Interactive dashboard
 
 ---

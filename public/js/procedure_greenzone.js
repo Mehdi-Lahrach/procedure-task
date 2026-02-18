@@ -372,6 +372,8 @@ const GREENZONE_PROCEDURE = {
           ],
         },
       ],
+      // If participant selects "No", skip the rest of the application
+      skipIf: { field: 'is_eligible', value: 'no', targetPageId: 'ineligible_end' },
     },
 
     {
@@ -419,7 +421,7 @@ const GREENZONE_PROCEDURE = {
       body: `
         <h2 class="gov-heading-m">Proof of residence</h2>
         <p class="gov-body">Please select the document you will submit as proof of residence.</p>
-        <p class="gov-body">A valid proof of residence must show the applicant's current address and be issued within the last 3 months.</p>
+        <p class="gov-body">A valid proof of residence must show the applicant's current address and be issued within the last 4 months.</p>
       `,
       fields: [
         {
@@ -610,6 +612,25 @@ const GREENZONE_PROCEDURE = {
           </div>
         </div>
         <p class="gov-body">Your application for a Municipal Green Zone Vehicle Access Permit has been submitted. You will receive confirmation within 10 working days.</p>
+        <hr class="gov-section-break gov-section-break--l gov-section-break--visible">
+        <h2 class="gov-heading-m">Thank you</h2>
+        <p class="gov-body">You have now finished the fictional application used in this study.</p>
+        <p class="gov-body">The following questions are about <strong>you specifically</strong> and <strong>your background</strong>. They are not part of the fictional scenario.</p>
+      `,
+      buttonText: 'Continue to final questions',
+    },
+
+    // ============================================================
+    // INELIGIBLE END — shown when participant selected "No" on eligibility
+    // ============================================================
+    {
+      id: 'ineligible_end',
+      type: 'info',
+      title: 'Application cannot proceed',
+      customHtml: `
+        <div class="gov-panel" style="background: #f3f2f1; padding: 20px 25px;">
+          <p class="gov-body" style="margin-top: 0;">Based on your eligibility assessment, the applicant is <strong>not eligible</strong> for the Municipal Green Zone Vehicle Access Permit. The application cannot be submitted.</p>
+        </div>
         <hr class="gov-section-break gov-section-break--l gov-section-break--visible">
         <h2 class="gov-heading-m">Thank you</h2>
         <p class="gov-body">You have now finished the fictional application used in this study.</p>

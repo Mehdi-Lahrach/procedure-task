@@ -263,6 +263,15 @@ class SludgeTracker {
     this._pushEvent('form_responses', { pageId, data });
   }
 
+  recordSkip(fromPageId, toPageId, formData) {
+    this._pushEvent('navigation', {
+      action: 'skip',
+      fromPageId,
+      toPageId,
+      reason: formData._skip_reason || 'conditional_skip',
+    });
+  }
+
   // ============================================================
   // SESSION COMPLETION
   // ============================================================

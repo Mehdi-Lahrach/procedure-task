@@ -177,7 +177,38 @@ class ProcedureEngine {
     this._collapseDocumentPreviews();
 
     this.pageHistory.push(this.currentPageIndex);
-    this.goToPage(this.currentPageIndex + 1);
+
+    // Check for conditional skip (e.g., ineligible → skip to post-task)
+    let nextIndex = this.currentPageIndex + 1;
+    if (page.skipToPageId) {
+      // skipToPageId can be set by a skipIf rule
+      const target = this.pages.findIndex(p => p.id === page.skipToPageId);
+      if (target >= 0) {
+        nextIndex = target;
+        // Store that a skip occurred for analytics
+        if (this.tracker) {
+          this.tracker.recordSkip(page.id, page.skipToPageId, this.formData);
+        }
+      }
+      delete page.skipToPageId; // one-time use
+    } else if (page.skipIf) {
+      // Evaluate skip condition: { field, value, targetPageId }
+      const fieldVal = this.formData[page.skipIf.field];
+      if (fieldVal === page.skipIf.value) {
+        const target = this.pages.findIndex(p => p.id === page.skipIf.targetPageId);
+        if (target >= 0) {
+          nextIndex = target;
+          // Mark session as skipped for analytics
+          this.formData._skipped_to = page.skipIf.targetPageId;
+          this.formData._skip_reason = `${page.skipIf.field}=${page.skipIf.value}`;
+          if (this.tracker) {
+            this.tracker.recordSkip(page.id, page.skipIf.targetPageId, this.formData);
+          }
+        }
+      }
+    }
+
+    this.goToPage(nextIndex);
 
     // Save progress after navigation
     if (this.tracker) {

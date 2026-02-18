@@ -16,7 +16,7 @@ They receive a set of **6 fictional personal documents** (driving license, vehic
 
 A **progress stepper** at the top of the page shows participants which section they're in (Applicant details → Eligibility → Vehicle details → Declaration → Submit). The stepper is only visible during the main application procedure — it does not appear on consent, instruction, post-task, or completion pages.
 
-### Procedure flow (19 pages)
+### Procedure flow (20 pages, with conditional skip)
 
 | # | Page | What happens |
 |---|------|-------------|
@@ -25,7 +25,7 @@ A **progress stepper** at the top of the page shows participants which section t
 | 3 | **Confirm instructions** | Comprehension check before starting |
 | 4 | **Applicant details** | Full name, date of birth, national ID (format: `ID-XXXXXX`), address, email, phone |
 | 5 | **Eligibility rules** | Complex eligibility criteria to read and understand |
-| 6 | **Eligibility decision** | Must assess whether they are eligible based on the rules |
+| 6 | **Eligibility decision** | Must assess whether they are eligible based on the rules. **If "No" → skip to page 15** |
 | 7 | **Document upload — eligibility** | Upload supporting documents for eligibility |
 | 8 | **Document upload — residence** | Upload proof of residence |
 | 9 | **Vehicle information** | Registration number (format: `AB-123-CD`), make, model, year |
@@ -34,13 +34,16 @@ A **progress stepper** at the top of the page shows participants which section t
 | 12 | **Vehicle environmental class** | Select environmental classification |
 | 13 | **Declaration** | Read and accept terms |
 | 14 | **Submit** | Confirmation screen (application submitted) |
-| 15 | **Demographics** | Post-task: age, gender, education, employment |
-| 16 | **Attention check** | Post-task quality check |
-| 17 | **Feedback** | Post-task: perceived difficulty, frustration, time perception |
-| 18 | **Debrief** | Explanation of the study purpose |
-| 19 | **Completion** | Prolific redirect button |
+| 15 | **Ineligible end** | Shown only if participant selected "No" — explains application cannot proceed |
+| 16 | **Demographics** | Post-task: age, gender, education, employment |
+| 17 | **Attention check** | Post-task quality check |
+| 18 | **Feedback** | Post-task: perceived difficulty, frustration, time perception |
+| 19 | **Debrief** | Explanation of the study purpose |
+| 20 | **Completion** | Prolific redirect button |
 
-Pages 4–13 show the **document reference panel** on the right side. Pages 15–18 are post-task measures (no documents).
+Pages 4–13 show the **document reference panel** on the right side. Pages 16–19 are post-task measures (no documents).
+
+**Ineligibility skip**: If a participant selects "No — the applicant is not eligible" on page 6, they skip pages 7–14 entirely and land on the "Ineligible end" page (15), then continue to post-task questions. Their session is flagged as `ineligible_skipped=yes` in the CSV and their timing data is excluded from the main procedure timing averages. The correct answer is "Yes" (eligible), so this also counts as a quality error.
 
 ---
 
@@ -58,10 +61,18 @@ Pages 4–13 show the **document reference panel** on the right side. Pages 15�
 - Total time spent viewing each document (ms)
 - Which documents were never consulted
 
-**Errors:**
+**Validation errors** (formatting issues caught by the form):
 - Total validation errors across the session
 - Errors per page (which pages cause the most trouble) — **accumulated across revisits** (if a participant revisits a page and triggers errors again, they add to the running total)
 - Errors per field (which specific fields are problematic)
+
+**Application quality scoring** (substantive errors in the submitted application):
+- The server automatically checks each submitted application against the **correct answers** derived from the fictional documents (name, DOB, national ID, eligibility decision, supporting documents, vehicle registration, owner type, category, fuel type, environmental classification)
+- `quality_errors`: number of fields with substantive errors (wrong information, not just formatting)
+- `quality_would_reject`: whether the application would be rejected by the administration (`yes` / `no`)
+- `quality_error_fields`: which fields were wrong (semicolon-separated)
+- `quality_error_details`: full detail of each error (submitted value vs. expected value)
+- This is distinct from validation errors — validation errors are formatting mistakes caught and corrected during the procedure; quality errors are factual mistakes in the final submitted application that the participant may not have noticed
 
 **Form responses:**
 - Every field value entered by the participant (stores the final values; overwritten on revisit)
@@ -93,7 +104,7 @@ Open the **live dashboard** at:
 http://YOUR_SERVER/dashboard?key=research2025
 ```
 
-This shows: color-coded status cards (complete/partial/incomplete counts), completion rate, average duration, average errors, page-by-page timing and error breakdown, document viewing rates, and drop-off analysis (where partial sessions stopped).
+This shows: color-coded status cards (complete/partial/incomplete/ineligible counts, full-procedure session count), completion rate, timing averages (computed from full-procedure sessions only, excluding ineligible), validation error rate, **application quality scoring** (rejection rate with per-field error breakdown table), page-by-page timing and validation error breakdown, document viewing rates, and drop-off analysis (where partial sessions stopped). The dashboard clearly distinguishes validation errors (formatting issues caught during the form) from quality errors (substantive mistakes in the submitted application).
 
 ### After data collection
 
@@ -102,7 +113,7 @@ This shows: color-coded status cards (complete/partial/incomplete counts), compl
 http://YOUR_SERVER/api/export/csv?key=research2025
 ```
 
-One row per participant. Columns include all base metrics, per-page timings (`time_applicant_details_ms`, `time_vehicle_info_ms`, ...), per-document stats (`doc_driving_license_opens`, `doc_driving_license_totalMs`, ...), per-page error counts (`errors_applicant_details`, ...), and all form field responses as individual columns.
+One row per participant. Columns include all base metrics, per-page timings (`time_applicant_details_ms`, `time_vehicle_info_ms`, ...), per-document stats (`doc_driving_license_opens`, `doc_driving_license_totalMs`, ...), per-page validation error counts (`errors_applicant_details`, ...), all form field responses as individual columns, application quality scoring columns (`quality_errors`, `quality_would_reject`, `quality_error_fields`, `quality_error_details`), and `ineligible_skipped` (`yes`/`no` — whether the participant selected "not eligible" and was skipped past the procedure). When analysing timing data, filter on `ineligible_skipped=no` to get only participants who completed the full procedure.
 
 **Full JSON (all event-level data):**
 ```
