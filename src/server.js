@@ -1196,6 +1196,23 @@ app.get('/api/list-sessions', checkKey, (req, res) => {
   })));
 });
 
+// --- Bulk import sessions (restore from CSV backup) ---
+app.post('/api/import-sessions', checkKey, (req, res) => {
+  try {
+    const { sessions } = req.body;
+    if (!Array.isArray(sessions) || sessions.length === 0)
+      return res.status(400).json({ error: 'sessions array required' });
+    const filepath = path.join(DATA_DIR, 'sessions.jsonl');
+    const lines = sessions.map(s => JSON.stringify({ ...s, _written_at: new Date().toISOString() }));
+    fs.writeFileSync(filepath, lines.join('\n') + '\n', 'utf8');
+    // Rebuild in-memory index
+    Object.keys(sessionIndex).forEach(k => delete sessionIndex[k]);
+    sessions.forEach(s => { sessionIndex[s.session_id] = s; });
+    console.log(`  [IMPORT] ${sessions.length} sessions restored`);
+    res.json({ success: true, imported: sessions.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- Remove specific participant by prolific_pid ---
 app.get('/api/remove-participant', checkKey, (req, res) => {
   try {
