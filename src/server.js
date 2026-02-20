@@ -1185,6 +1185,17 @@ app.post('/api/delete-all-data', checkKey, (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// --- List all sessions (prolific_pid + completion status) ---
+app.get('/api/list-sessions', checkKey, (req, res) => {
+  const sessions = readJsonl('sessions.jsonl');
+  res.json(sessions.map(s => ({
+    session_id: s.session_id,
+    prolific_pid: s.prolific_pid,
+    completion_status: s.completion_status,
+    completed_at: s.completed_at || null,
+  })));
+});
+
 // --- Remove specific participant by prolific_pid ---
 app.get('/api/remove-participant', checkKey, (req, res) => {
   try {
