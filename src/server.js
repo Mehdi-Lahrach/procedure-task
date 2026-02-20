@@ -736,7 +736,7 @@ function getLastPage(session) {
 app.get('/api/stats', checkKey, (req, res) => {
   try {
     const all = getMergedSessions();
-    const fmt = ms => { if (!ms) return '0s'; const s = Math.floor(ms/1000); const m = Math.floor(s/60); return m > 0 ? `${m}m ${s%60}s` : `${s}s`; };
+    const fmt = ms => { if (!ms) return '0s'; const s = Math.round(ms/1000); const m = Math.floor(s/60); return m > 0 ? `${m}m ${s%60}s` : `${s}s`; };
 
     // Classify sessions using the 5-category system
     const classified = all.map(s => ({ ...s, completion_status: getCompletionStatus(s), last_page: getLastPage(s) }));
@@ -1366,7 +1366,7 @@ full = df[df.completion_status == "complete"]</pre>
 
 <script>
 const K = '${EXPORT_KEY}';
-const fmt = ms => { if (!ms) return '0s'; const s = Math.floor(ms/1000); const m = Math.floor(s/60); return m > 0 ? m+'m '+s%60+'s' : s+'s'; };
+const fmt = ms => { if (!ms) return '0s'; const s = Math.round(ms/1000); const m = Math.floor(s/60); return m > 0 ? m+'m '+s%60+'s' : s+'s'; };
 
 const SECTIONS = {
   'Consent': 'Consent',
@@ -1566,7 +1566,7 @@ fetch('/api/stats?key='+K).then(r=>r.json()).then(s=>{
     ['Response rate', responseRate + '%', responseRate >= 80 ? 'green' : responseRate >= 50 ? 'amber' : 'red'],
   ].map(([l,v,c])=>'<div class="stat'+(c?' stat--'+c:'')+'"><div class="stat-value">'+v+'</div><div class="stat-label">'+l+'</div></div>').join('');
 
-  const fmtSec = sec => { if (!sec && sec !== 0) return '—'; const m = Math.floor(sec/60); const s2 = sec % 60; return m > 0 ? m+'m '+s2+'s' : s2+'s'; };
+  const fmtSec = sec => { if (!sec && sec !== 0) return '—'; const s2 = Math.round(sec); const m = Math.floor(s2/60); return m > 0 ? m+'m '+(s2%60)+'s' : s2+'s'; };
   const ratioColor = r => { if (r === '—') return ''; const v = parseFloat(r); if (v > 1.1) return ' style="color:#b58105;font-weight:700"'; if (v < 0.9) return ' style="color:#1d70b8;font-weight:700"'; return ' style="color:#00703c;font-weight:700"'; };
   const estRows = [est.self, est.average].filter(c => c && c.n > 0);
   document.querySelector('#estimation-table tbody').innerHTML = estRows.map(c =>
