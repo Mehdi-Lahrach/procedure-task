@@ -1185,6 +1185,40 @@ app.post('/api/delete-all-data', checkKey, (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// --- Remove specific participant by prolific_pid ---
+app.get('/api/remove-participant', checkKey, (req, res) => {
+  try {
+    const { pid } = req.query;
+    if (!pid) return res.status(400).json({ error: 'pid query param required' });
+
+    const sessions = readJsonl('sessions.jsonl');
+    const toRemove = sessions.filter(s => s.prolific_pid === pid);
+    if (toRemove.length === 0) return res.status(404).json({ error: 'No sessions found for that prolific_pid' });
+
+    const sessionIds = new Set(toRemove.map(s => s.session_id));
+
+    // Filter sessions.jsonl
+    const filtered = sessions.filter(s => s.prolific_pid !== pid);
+    const sessionsPath = path.join(DATA_DIR, 'sessions.jsonl');
+    fs.writeFileSync(sessionsPath, filtered.map(s => JSON.stringify(s)).join('\n') + (filtered.length ? '\n' : ''), 'utf8');
+
+    // Filter all event files by session_id
+    ['navigation_events.jsonl', 'misc_events.jsonl', 'sessions_updates.jsonl'].forEach(filename => {
+      const filepath = path.join(DATA_DIR, filename);
+      if (!fs.existsSync(filepath)) return;
+      const records = readJsonl(filename);
+      const filteredRecords = records.filter(r => !sessionIds.has(r.session_id));
+      fs.writeFileSync(filepath, filteredRecords.map(r => JSON.stringify(r)).join('\n') + (filteredRecords.length ? '\n' : ''), 'utf8');
+    });
+
+    // Remove from in-memory index
+    sessionIds.forEach(sid => delete sessionIndex[sid]);
+
+    console.log(`  [REMOVE] Participant ${pid} removed (${toRemove.length} session(s))`);
+    res.json({ success: true, removed_sessions: toRemove.length, session_ids: [...sessionIds] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- Dashboard ---
 app.get('/dashboard', checkKey, (req, res) => {
   res.send(`<!DOCTYPE html><html><head><title>Sludge Experiment Dashboard</title>
