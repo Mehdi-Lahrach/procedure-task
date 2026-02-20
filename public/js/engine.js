@@ -165,12 +165,19 @@ class ProcedureEngine {
   nextPage() {
     const page = this.pages[this.currentPageIndex];
 
-    if (page.type === 'form') {
+    if (page.type === 'form' || (page.type === 'review' && page.fields)) {
       if (!this.validateCurrentPage()) return;
       this.collectFormData(page);
       if (this.tracker) {
         this._recordPageResponses(page);
       }
+    }
+
+    // When leaving application_submitted, send a snapshot of all tracker data
+    // (includes estimation responses collected from this page's form fields)
+    // so that "submitted" sessions have exploitable data even if the participant drops out
+    if (page.id === 'application_submitted' && this.tracker) {
+      this.tracker.sendSnapshot();
     }
 
     // Auto-collapse any open document previews before navigating
@@ -211,8 +218,9 @@ class ProcedureEngine {
     this.goToPage(nextIndex);
 
     // Save progress after navigation
+    const currentPage = this.pages[this.currentPageIndex];
     if (this.tracker) {
-      this.tracker.saveProgress(this.currentPageIndex, this.formData);
+      this.tracker.saveProgress(this.currentPageIndex, this.formData, currentPage ? currentPage.id : null);
     }
   }
 
@@ -247,7 +255,8 @@ class ProcedureEngine {
 
       // Save progress after navigation
       if (this.tracker) {
-        this.tracker.saveProgress(this.currentPageIndex, this.formData);
+        const prevPage = this.pages[this.currentPageIndex];
+        this.tracker.saveProgress(this.currentPageIndex, this.formData, prevPage ? prevPage.id : null);
       }
     }
   }
@@ -281,12 +290,17 @@ class ProcedureEngine {
     const page = this.pages[this.currentPageIndex];
     if (!page.fields) return true;
 
+    // Collect current DOM values into formData BEFORE validation
+    // so that page-level validation functions see fresh values
+    this.collectFormData(page);
+
     let hasErrors = false;
     const errors = [];
 
     // Clear existing errors
     document.querySelectorAll('.gov-form-group--error').forEach(g => g.classList.remove('gov-form-group--error'));
     document.querySelectorAll('.gov-error-message').forEach(e => e.remove());
+    document.querySelectorAll('.estimation-block__input--error').forEach(e => e.classList.remove('estimation-block__input--error'));
     const es = document.querySelector('.gov-error-summary');
     if (es) es.remove();
 
@@ -298,6 +312,15 @@ class ProcedureEngine {
         this._showFieldError(field.name, error.message);
       }
     });
+
+    // Page-level validation (runs after field-level, can check cross-field rules)
+    if (!hasErrors && page.validation) {
+      const pageError = page.validation(this.formData);
+      if (pageError) {
+        hasErrors = true;
+        errors.push({ name: page.fields[0]?.name || 'form', message: pageError });
+      }
+    }
 
     if (hasErrors) {
       // Error summary at top
@@ -330,7 +353,12 @@ class ProcedureEngine {
     if (field.type === 'radio') {
       value = document.querySelector(`[name="${field.name}"]:checked`)?.value || '';
     } else if (field.type === 'checkbox') {
-      value = document.querySelectorAll(`[name="${field.name}"]:checked`).length > 0 ? 'checked' : '';
+      const checked = document.querySelectorAll(`[name="${field.name}"]:checked`);
+      value = checked.length > 0 ? 'checked' : '';
+      // If requireAll is set, all options must be checked
+      if (field.requireAll && field.options && checked.length < field.options.length) {
+        return { name: field.name, message: field.errorMessage || 'You must tick all checkboxes to continue.' };
+      }
     } else if (field.type === 'date_group') {
       const d = document.querySelector(`[name="${field.name}_day"]`)?.value.trim() || '';
       const m = document.querySelector(`[name="${field.name}_month"]`)?.value.trim() || '';
@@ -559,6 +587,7 @@ class ProcedureEngine {
         ${page.description ? `<p class="gov-body">${page.description}</p>` : ''}
         ${page.body ? `<div>${page.body}</div>` : ''}
         ${page.hint ? `<div class="gov-inset-text">${page.hint}</div>` : ''}
+        ${page.customHtml ? page.customHtml : ''}
         ${page.fields.map(field => this.renderField(field)).join('')}
         <div style="display: flex; gap: 15px; margin-top: 40px;">
           ${page.allowBack ? `<button class="gov-button gov-button--secondary" id="btn-back">Back</button>` : ''}
@@ -568,6 +597,9 @@ class ProcedureEngine {
   }
 
   renderField(field) {
+    // Fields with render: false are validated and collected but not rendered by the engine.
+    // They must be present in the DOM via body or customHtml with matching name attributes.
+    if (field.render === false) return '';
     const existingValue = this.formData[field.name] || '';
     let html = `<div class="gov-form-group" id="group-${field.name}">`;
 
@@ -722,13 +754,31 @@ class ProcedureEngine {
     if (page.sections) {
       page.sections.forEach(section => {
         sectionsHtml += `<h2 class="gov-heading-m">${section.title}</h2><dl class="gov-summary-list">`;
-        section.fields.forEach(fieldName => {
+        section.fields.forEach(fieldDef => {
+          const fieldName = typeof fieldDef === 'string' ? fieldDef : fieldDef.name;
+          const customLabel = typeof fieldDef === 'object' ? fieldDef.label : null;
           const def = this._findFieldDef(fieldName);
-          const val = this.formData[fieldName] || '\u2014';
-          const disp = Array.isArray(val) ? val.join(', ') : val;
+          const val = this.formData[fieldName];
+          let disp = '\u2014';
+          if (val !== undefined && val !== null && val !== '') {
+            if (Array.isArray(val)) {
+              // For checkbox arrays, try to resolve option labels
+              if (def && def.options) {
+                disp = val.map(v => { const opt = def.options.find(o => o.value === v); return opt ? opt.label : v.replace(/_/g, ' '); }).join(', ');
+              } else {
+                disp = val.map(v => v.replace(/_/g, ' ')).join(', ');
+              }
+            } else if (def && def.options) {
+              const opt = def.options.find(o => o.value === val);
+              disp = opt ? opt.label : val.replace(/_/g, ' ');
+            } else {
+              disp = String(val);
+            }
+          }
+          const label = customLabel || (def ? def.label : fieldName.replace(/_/g, ' '));
           sectionsHtml += `
             <div class="gov-summary-list__row">
-              <dt class="gov-summary-list__key">${def ? def.label : fieldName}</dt>
+              <dt class="gov-summary-list__key">${label}</dt>
               <dd class="gov-summary-list__value">${disp}</dd>
             </div>`;
         });
@@ -737,15 +787,16 @@ class ProcedureEngine {
     }
     return `
       <div class="gov-main__two-thirds">
+        ${page.section ? `<span class="gov-caption-l">${page.section}</span>` : ''}
         <h1 class="gov-heading-l">${page.title}</h1>
         <p class="gov-body">${page.description || 'Check your answers before submitting your application.'}</p>
         ${sectionsHtml}
-        ${page.declaration ? `<h2 class="gov-heading-m">Declaration</h2><div class="gov-inset-text">${page.declaration}</div>` : ''}
-        <div class="gov-warning-text">
-          <span class="gov-warning-text__icon">!</span>
-          <span>By submitting this application, you confirm that the information you have provided is correct to the best of your knowledge.</span>
+        ${page.customHtml || ''}
+        ${page.fields ? page.fields.map(f => this.renderField(f)).join('') : ''}
+        <div style="display: flex; gap: 15px; margin-top: 40px;">
+          ${page.allowBack ? `<button class="gov-button gov-button--secondary" id="btn-back">Back</button>` : ''}
+          <button class="gov-button" id="btn-next">${page.buttonText || 'Continue'}</button>
         </div>
-        <button class="gov-button" id="btn-next">${page.buttonText || 'Accept and submit'}</button>
       </div>`;
   }
 
@@ -825,6 +876,21 @@ class ProcedureEngine {
 
     if (page.type === 'completion' && this.tracker) {
       this.tracker.completeSession();
+    }
+
+    // Wire up Likert scale buttons (used by customHtml estimation UI)
+    const likertBtns = document.querySelectorAll('.likert-btn');
+    if (likertBtns.length > 0) {
+      const hiddenInput = document.getElementById('time_estimate_confidence');
+      likertBtns.forEach(btn => {
+        btn.addEventListener('click', function() {
+          likertBtns.forEach(b => b.classList.remove('likert-btn--selected'));
+          this.classList.add('likert-btn--selected');
+          if (hiddenInput) hiddenInput.value = this.dataset.value;
+          const section = document.getElementById('confidence-section');
+          if (section) section.classList.remove('confidence-missing');
+        });
+      });
     }
   }
 }

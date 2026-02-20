@@ -1314,3 +1314,166 @@ body {
     max-width: none;
   }
 }
+
+/* ============================================================
+   TIME ESTIMATION UI — matches the estimation task's design
+   ============================================================ */
+
+.estimation-prompt {
+  margin-bottom: 24px;
+}
+
+/* Estimation block wrapper — styled container for the time inputs */
+.estimation-block {
+  border: 2px solid #1d70b8;
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin: 20px 0;
+  background: #f8f9fa;
+}
+
+.estimation-block__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.estimation-block__icon {
+  font-size: 20px;
+}
+
+.estimation-block__label {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0b0c0c;
+}
+
+/* Side-by-side minutes and seconds inputs */
+.estimation-block__input-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.estimation-block__input-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.estimation-block__input {
+  width: 72px;
+  padding: 10px 8px;
+  border: 2px solid #b1b4b6;
+  border-radius: 6px;
+  font-size: 20px;
+  font-weight: 600;
+  text-align: center;
+  transition: border-color 0.2s;
+}
+
+.estimation-block__input:focus {
+  outline: none;
+  border-color: #1d70b8;
+  box-shadow: 0 0 0 3px rgba(29,112,184,0.15);
+}
+
+.estimation-block__input.input-error,
+.estimation-block__input--error {
+  border-color: #d4351c;
+  box-shadow: 0 0 0 3px rgba(212,53,28,0.15);
+}
+
+.estimation-block__unit {
+  font-size: 14px;
+  font-weight: 500;
+  color: #505a5f;
+}
+
+/* Confidence Likert scale */
+.estimation-block__confidence {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 10px 0 0;
+}
+
+.estimation-block__confidence-label {
+  font-size: 13px;
+  color: #505a5f;
+  font-weight: 500;
+}
+
+.likert-scale {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  justify-content: center;
+}
+
+.likert-anchor {
+  font-size: 11px;
+  color: #505a5f;
+  text-align: center;
+  line-height: 1.3;
+  min-width: 64px;
+  flex-shrink: 0;
+}
+
+.likert-anchor--low {
+  text-align: right;
+  padding-right: 10px;
+}
+
+.likert-anchor--high {
+  text-align: left;
+  padding-left: 10px;
+}
+
+.likert-btn {
+  width: 40px;
+  height: 40px;
+  border: 2px solid #b1b4b6;
+  border-radius: 50%;
+  background: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin: 0 4px;
+  color: #0b0c0c;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.likert-btn:hover {
+  background: #f3f2f1;
+  border-color: #1d70b8;
+}
+
+.likert-btn.selected,
+.likert-btn--selected {
+  background: #1d70b8;
+  color: white;
+  border-color: #1d70b8;
+  transform: scale(1.1);
+}
+
+.confidence-missing {
+  background: #fef7f7;
+  border: 2px solid #d4351c;
+  border-radius: 8px;
+  padding: 8px 10px;
+  animation: confidence-shake 0.4s ease;
+}
+
+@keyframes confidence-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}

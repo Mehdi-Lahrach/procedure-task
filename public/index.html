@@ -146,6 +146,25 @@
       // Select procedure
       const procedure = GREENZONE_PROCEDURE;
 
+      // Set application_submitted page body: confirmation panel + condition-specific estimation prompt
+      const condition = result.condition || 'self';
+      const submittedPage = procedure.pages.find(p => p.id === 'application_submitted');
+      if (submittedPage) {
+        const confirmationHtml = `
+          <div class="gov-panel gov-panel--confirmation" style="margin-bottom: 20px;">
+            <h1 class="gov-panel__title">Application submitted</h1>
+            <div class="gov-panel__body">
+              Reference number<br><strong>GZ-2025-00481</strong>
+            </div>
+          </div>
+          <p class="gov-body">Your application for a Municipal Green Zone Vehicle Access Permit has been submitted. You will receive confirmation within 10 working days.</p>
+          <hr class="gov-section-break gov-section-break--l gov-section-break--visible">`;
+        const promptHtml = condition === 'average'
+          ? TIME_ESTIMATION_PROMPT_AVERAGE
+          : TIME_ESTIMATION_PROMPT_SELF;
+        submittedPage.body = confirmationHtml + promptHtml;
+      }
+
       // Create engine with optional resume state
       const engine = new ProcedureEngine(procedure, tracker, result.resumeState || null);
       engine.start();

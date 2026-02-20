@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -37,6 +37,53 @@ function loadSessionIndex() {
   console.log(`  Loaded ${Object.keys(sessionIndex).length} existing sessions`);
 }
 
+// --- Block Randomization for Estimation Condition ---
+// Two conditions: 'self' (estimate own time) vs 'average' (estimate average participant time)
+const ESTIMATION_CONDITIONS = ['self', 'average'];
+const ESTIMATION_BLOCK_SIZE = 4; // 2 self + 2 average per block
+
+function blockRandomize(existingSessions) {
+  // Only count non-forced assignments
+  const assigned = existingSessions
+    .filter(s => !s.condition_forced && s.condition_code && ESTIMATION_CONDITIONS.includes(s.condition_code))
+    .map(s => s.condition_code);
+
+  const total = assigned.length;
+  const posInBlock = total % ESTIMATION_BLOCK_SIZE;
+
+  if (posInBlock === 0) {
+    // New block: generate permuted block (Fisher-Yates shuffle)
+    const block = [];
+    for (const c of ESTIMATION_CONDITIONS) {
+      for (let i = 0; i < ESTIMATION_BLOCK_SIZE / ESTIMATION_CONDITIONS.length; i++) block.push(c);
+    }
+    for (let i = block.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [block[i], block[j]] = [block[j], block[i]];
+    }
+    blockRandomize._currentBlock = block;
+    return block[0];
+  }
+
+  // Mid-block: use stored block with consistency check
+  if (blockRandomize._currentBlock && blockRandomize._currentBlock.length === ESTIMATION_BLOCK_SIZE) {
+    const expected = blockRandomize._currentBlock.slice(0, posInBlock);
+    const actual = assigned.slice(-posInBlock);
+    const consistent = expected.every((c, i) => c === actual[i]);
+    if (consistent) {
+      return blockRandomize._currentBlock[posInBlock];
+    }
+  }
+
+  // Fallback: balanced assignment (server restart mid-block)
+  const selfCount = assigned.filter(c => c === 'self').length;
+  const avgCount = assigned.filter(c => c === 'average').length;
+  if (selfCount < avgCount) return 'self';
+  if (avgCount < selfCount) return 'average';
+  return Math.random() < 0.5 ? 'self' : 'average';
+}
+blockRandomize._currentBlock = null;
+
 // --- Session Management ---
 app.post('/api/session/create', (req, res) => {
   try {
@@ -46,10 +93,19 @@ app.post('/api/session/create', (req, res) => {
       user_agent, userAgent, screen_width, screenWidth, screen_height, screenHeight,
       window_width, windowWidth, window_height, windowHeight,
       timezone, language, platform, metadata } = req.body;
+
+    // Determine estimation condition via block randomization
+    const requestedCondition = condition_code || condition || null;
+    const isValidCondition = requestedCondition && ESTIMATION_CONDITIONS.includes(requestedCondition);
+    const allSessions = Object.values(sessionIndex);
+    const assignedCondition = isValidCondition ? requestedCondition : blockRandomize(allSessions);
+    const conditionForced = isValidCondition; // true if researcher forced via URL param
+
     const session = {
       session_id: sessionId, prolific_pid: prolific_pid || prolificPid || null,
       study_id: study_id || studyId || null, session_id_prolific: session_id_prolific || sessionIdProlific || null,
-      condition_code: condition_code || condition || 'default', procedure_version: procedure_version || procedureId || 'v1',
+      condition_code: assignedCondition, condition_forced: conditionForced,
+      procedure_version: procedure_version || procedureId || 'v1',
       user_agent: user_agent || userAgent || null,
       screen_width: screen_width || screenWidth, screen_height: screen_height || screenHeight,
       window_width: window_width || windowWidth, window_height: window_height || windowHeight,
@@ -59,7 +115,7 @@ app.post('/api/session/create', (req, res) => {
     };
     appendJsonl('sessions.jsonl', session);
     sessionIndex[sessionId] = session;
-    res.json({ success: true, session_id: sessionId });
+    res.json({ success: true, session_id: sessionId, condition: assignedCondition });
   } catch (err) {
     console.error('Error creating session:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -78,17 +134,19 @@ app.post('/api/session/consent', (req, res) => {
 // --- Session Progress (save/resume) ---
 app.post('/api/session/progress', (req, res) => {
   try {
-    const { session_id, currentPageIndex, formData } = req.body;
+    const { session_id, currentPageIndex, currentPageId, formData } = req.body;
     if (!session_id) return res.status(400).json({ success: false, error: 'Missing session_id' });
     const update = {
       session_id,
       update_type: 'progress',
       currentPageIndex: currentPageIndex != null ? currentPageIndex : 0,
+      currentPageId: currentPageId || null,
       formData: formData || {},
     };
     appendJsonl('sessions_updates.jsonl', update);
     if (sessionIndex[session_id]) {
       sessionIndex[session_id].currentPageIndex = update.currentPageIndex;
+      sessionIndex[session_id].currentPageId = update.currentPageId;
       sessionIndex[session_id].formData = update.formData;
     }
     res.json({ success: true });
@@ -122,6 +180,7 @@ app.get('/api/session/resume', (req, res) => {
     res.json({
       found: true,
       session_id: session.session_id,
+      condition: session.condition_code || 'self',
       currentPageIndex: session.currentPageIndex || 0,
       formData: session.formData || {},
       is_complete: !!session.is_complete,
@@ -156,6 +215,42 @@ app.post('/api/session/complete', (req, res) => {
     };
     appendJsonl('sessions_updates.jsonl', completion);
     if (sessionIndex[session_id]) Object.assign(sessionIndex[session_id], completion);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// --- Session Snapshot (partial summary sent on application submission) ---
+// This captures timing/error/document data for participants who submit the application
+// but may drop out before final completion. Ensures "submitted" sessions have exploitable data.
+app.post('/api/session/snapshot', (req, res) => {
+  try {
+    const { session_id } = req.body;
+    if (!session_id) return res.status(400).json({ success: false, error: 'Missing session_id' });
+    const snapshot = {
+      session_id,
+      update_type: 'snapshot',
+      snapshot_at: new Date().toISOString(),
+      totalDurationMs: req.body.totalDurationMs || 0,
+      applicationDurationMs: req.body.applicationDurationMs || 0,
+      totalDocTimeMs: req.body.totalDocTimeMs || 0,
+      totalDocOpens: req.body.totalDocOpens || 0,
+      totalErrors: req.body.totalErrors || 0,
+      errorCountsByPage: req.body.errorCountsByPage || {},
+      errorCountsByField: req.body.errorCountsByField || {},
+      pageTimings: req.body.pageTimings || [],
+      docInteractions: req.body.docInteractions || [],
+      formResponses: req.body.formResponses || {},
+      total_duration_ms: req.body.totalDurationMs || 0,
+      total_errors: req.body.totalErrors || 0,
+    };
+    appendJsonl('sessions_updates.jsonl', snapshot);
+    // Save snapshot data to session — will be overwritten by complete data if they finish
+    if (sessionIndex[session_id]) {
+      // Only apply snapshot if session is not already complete
+      if (!sessionIndex[session_id].is_complete) {
+        Object.assign(sessionIndex[session_id], snapshot);
+      }
+    }
     res.json({ success: true });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
@@ -277,7 +372,7 @@ const ANSWER_KEY = {
  * Returns { totalErrors, errors: [{ field, submitted, expected, description }], wouldReject }
  */
 function scoreApplication(session) {
-  const result = { totalErrors: 0, errors: [], wouldReject: false };
+  const result = { totalErrors: 0, errors: [], wouldReject: false, overDocumentation: [] };
   if (!session.formResponses) return result;
 
   // Flatten all form responses into one object
@@ -301,6 +396,16 @@ function scoreApplication(session) {
           description: `Missing required document(s): ${missing.join(', ')}`,
         });
         result.totalErrors++;
+      }
+      // Track over-documentation: extra documents beyond what's required
+      const extras = arr.filter(v => !rule.correct.includes(v));
+      if (extras.length > 0) {
+        result.overDocumentation.push({
+          field,
+          extraDocs: extras,
+          totalSelected: arr.length,
+          requiredCount: rule.correct.length,
+        });
       }
     } else if (rule.type === 'one_of') {
       // Submitted should be one of the acceptable values
@@ -379,7 +484,7 @@ app.get('/api/export/csv', checkKey, (req, res) => {
     });
 
     const baseHeaders = [
-      'session_id', 'prolific_pid', 'study_id', 'condition_code', 'procedure_version',
+      'session_id', 'prolific_pid', 'study_id', 'condition_code', 'condition_forced', 'procedure_version',
       'started_at', 'completed_at', 'completion_status', 'last_page', 'consent_given',
       'totalDurationMs', 'applicationDurationMs', 'totalDocTimeMs', 'totalDocOpens', 'totalErrors',
       'screen_width', 'screen_height', 'timezone', 'language', 'platform',
@@ -393,8 +498,12 @@ app.get('/api/export/csv', checkKey, (req, res) => {
     const errorByPageHeaders = Array.from(allPageIds).sort().map(pid => `errors_${pid}`);
     const formFieldHeaders = Array.from(allFormFields).sort();
 
-    const qualityHeaders = ['quality_errors', 'quality_would_reject', 'quality_error_fields', 'quality_error_details', 'ineligible_skipped'];
-    const headers = [...baseHeaders, ...pageTimingHeaders, ...docHeaders, ...errorByPageHeaders, ...formFieldHeaders, ...qualityHeaders];
+    const qualityHeaders = ['quality_errors', 'quality_would_reject', 'quality_error_fields', 'quality_error_details',
+      'overdoc_eligibility', 'overdoc_eligibility_extras', 'overdoc_eligibility_total_selected',
+      'overdoc_residence', 'overdoc_residence_selected',
+      'ineligible_skipped'];
+    const computedHeaders = ['time_estimate_total_seconds'];
+    const headers = [...baseHeaders, ...pageTimingHeaders, ...docHeaders, ...errorByPageHeaders, ...formFieldHeaders, ...qualityHeaders, ...computedHeaders];
 
     const rows = sessions.map(s => {
       const row = {};
@@ -439,9 +548,25 @@ app.get('/api/export/csv', checkKey, (req, res) => {
       row['quality_error_fields'] = score.errors.map(e => e.field).join(';');
       row['quality_error_details'] = score.errors.map(e => `${e.field}: submitted="${e.submitted}" expected="${e.expected}"`).join(' | ');
 
+      // Over-documentation tracking
+      const eligOverdoc = score.overDocumentation.find(o => o.field === 'eligibility_documents');
+      row['overdoc_eligibility'] = eligOverdoc ? 'yes' : 'no';
+      row['overdoc_eligibility_extras'] = eligOverdoc ? eligOverdoc.extraDocs.join(';') : '';
+      row['overdoc_eligibility_total_selected'] = eligOverdoc ? eligOverdoc.totalSelected : (allResponses.eligibility_documents ? (Array.isArray(allResponses.eligibility_documents) ? allResponses.eligibility_documents.length : 1) : '');
+      // Residence is a radio (single select), so over-doc means they picked something that's not a valid recent bill
+      // We track what they selected — the quality scoring handles correctness separately
+      const residenceVal = allResponses.residence_document || '';
+      row['overdoc_residence'] = (residenceVal && !['electricity_bill'].includes(residenceVal)) ? 'wrong_choice' : 'correct';
+      row['overdoc_residence_selected'] = residenceVal;
+
       // Flag if participant said "not eligible" and was skipped past the procedure
       const isIneligible = allResponses.is_eligible === 'no';
       row['ineligible_skipped'] = isIneligible ? 'yes' : 'no';
+
+      // Computed: time estimate in total seconds (for easier analysis)
+      const estMin = parseInt(allResponses.time_estimate_minutes) || 0;
+      const estSec = parseInt(allResponses.time_estimate_seconds) || 0;
+      row['time_estimate_total_seconds'] = (estMin > 0 || estSec > 0) ? (estMin * 60 + estSec) : '';
 
       return row;
     });
@@ -501,15 +626,14 @@ const PAGE_NAMES = {
   instructions: 'Instructions',
   confirm_instructions: 'Confirm instructions',
   applicant_details: 'Applicant details',
-  eligibility_rules: 'Eligibility rules',
-  eligibility_decision: 'Eligibility decision',
+  eligibility_rules: 'Eligibility rules & decision',
   doc_upload_eligibility: 'Upload eligibility docs',
   doc_upload_residence: 'Upload residence docs',
   vehicle_info: 'Vehicle information',
   vehicle_category: 'Vehicle category',
   vehicle_fuel: 'Vehicle fuel type',
   vehicle_env_class: 'Vehicle environmental class',
-  declaration: 'Declaration',
+  application_review: 'Review & submit',
   application_submitted: 'Application submitted',
   demographics: 'Demographics',
   attention_check: 'Attention check',
@@ -533,9 +657,9 @@ const docName = id => DOC_NAMES[id] || id;
 const PAGE_ORDER = [
   'consent', 'instructions', 'confirm_instructions',
   'applicant_details',
-  'eligibility_rules', 'eligibility_decision', 'doc_upload_eligibility', 'doc_upload_residence',
+  'eligibility_rules', 'doc_upload_eligibility', 'doc_upload_residence',
   'vehicle_info', 'vehicle_category', 'vehicle_fuel', 'vehicle_env_class',
-  'declaration', 'application_submitted',
+  'application_review', 'application_submitted',
   'ineligible_end',
   'demographics', 'attention_check',
   'feedback', 'debrief', 'completion',
@@ -544,9 +668,9 @@ const PAGE_ORDER = [
 // Pages that are part of the main task (application)
 const APPLICATION_PAGES = [
   'applicant_details',
-  'eligibility_rules', 'eligibility_decision', 'doc_upload_eligibility', 'doc_upload_residence',
+  'eligibility_rules', 'doc_upload_eligibility', 'doc_upload_residence',
   'vehicle_info', 'vehicle_category', 'vehicle_fuel', 'vehicle_env_class',
-  'declaration',
+  'application_review',
 ];
 
 // Completion status — 5 categories:
@@ -582,14 +706,19 @@ function checkIneligible(session) {
 }
 
 // Helper: did the participant reach the application_submitted page?
+// A session counts as "submitted" as soon as the participant lands on the application_submitted confirmation page.
 function hasReachedSubmission(session) {
+  // Check pageTimings (available when session is complete)
   if (session.pageTimings && Array.isArray(session.pageTimings)) {
     const visitedPages = new Set(session.pageTimings.map(pt => pt.pageId));
     if (visitedPages.has('application_submitted')) return true;
   }
-  // Fallback: check currentPageIndex (application_submitted is around index 13-14)
+  // Check currentPageId saved in progress (most reliable for incomplete sessions)
+  const postSubmissionPages = ['application_submitted', 'demographics', 'attention_check', 'feedback', 'debrief', 'completion'];
+  if (session.currentPageId && postSubmissionPages.includes(session.currentPageId)) return true;
+  // Fallback: check currentPageIndex (application_submitted is at index 12 in the procedure pages)
   const pageIndex = session.currentPageIndex || 0;
-  if (pageIndex >= 14) return true;
+  if (pageIndex >= 12) return true;
   return false;
 }
 
@@ -696,7 +825,7 @@ app.get('/api/stats', checkKey, (req, res) => {
       .filter(pid => pageStats[pid] && pageStats[pid].nTime > 0)
       .map(pid => {
         const d = pageStats[pid];
-        const isFormPage = APPLICATION_PAGES.includes(pid) || pid === 'demographics' || pid === 'attention_check' || pid === 'feedback';
+        const isFormPage = APPLICATION_PAGES.includes(pid) || pid === 'application_submitted' || pid === 'demographics' || pid === 'attention_check' || pid === 'feedback';
         return {
           pageId: pid,
           pageName: pageName(pid),
@@ -767,6 +896,229 @@ app.get('/api/stats', checkKey, (req, res) => {
       }))
       .sort((a, b) => b.count - a.count);
 
+    // Over-documentation analysis
+    const overdocEligCount = qualityScores.filter(q => q.overDocumentation.some(o => o.field === 'eligibility_documents')).length;
+    const overdocEligRate = exploitable.length > 0 ? Math.round(overdocEligCount / exploitable.length * 100) : 0;
+    // Collect which extra docs people selected for eligibility
+    const overdocEligExtras = {};
+    qualityScores.forEach(q => {
+      q.overDocumentation.filter(o => o.field === 'eligibility_documents').forEach(o => {
+        o.extraDocs.forEach(d => {
+          if (!overdocEligExtras[d]) overdocEligExtras[d] = 0;
+          overdocEligExtras[d]++;
+        });
+      });
+    });
+    const overdocEligExtrasList = Object.entries(overdocEligExtras)
+      .map(([doc, count]) => ({ doc, count, rate: exploitable.length > 0 ? Math.round(count / exploitable.length * 100) : 0 }))
+      .sort((a, b) => b.count - a.count);
+
+    // Residence: track what participants selected (radio, so no "extra" — just wrong choice)
+    // We flatten responses for each exploitable session
+    const residenceChoices = {};
+    exploitable.forEach(s => {
+      const responses = {};
+      if (s.formResponses) Object.values(s.formResponses).forEach(pd => Object.assign(responses, pd));
+      const choice = responses.residence_document;
+      if (choice) {
+        if (!residenceChoices[choice]) residenceChoices[choice] = 0;
+        residenceChoices[choice]++;
+      }
+    });
+    const residenceBreakdown = Object.entries(residenceChoices)
+      .map(([doc, count]) => ({ doc, count, rate: exploitable.length > 0 ? Math.round(count / exploitable.length * 100) : 0, isCorrect: doc === 'electricity_bill' }))
+      .sort((a, b) => b.count - a.count);
+
+    // Phase-level timing (aggregate page times into sections)
+    const PHASE_MAP = {
+      'applicant_details': 'Applicant Details',
+      'eligibility_rules': 'Eligibility',
+      'doc_upload_eligibility': 'Eligibility', 'doc_upload_residence': 'Eligibility',
+      'vehicle_info': 'Vehicle Details', 'vehicle_category': 'Vehicle Details',
+      'vehicle_fuel': 'Vehicle Details', 'vehicle_env_class': 'Vehicle Details',
+      'application_review': 'Review & Submit',
+    };
+    const phaseTotals = {}; // { phaseName: { totalMs: 0, sessionCount: 0 } }
+    exploitable.forEach(s => {
+      if (!s.pageTimings) return;
+      // Accumulate per-session phase totals first, so each session counts once per phase
+      const sessionPhaseTotals = {};
+      s.pageTimings.forEach(pt => {
+        const phase = PHASE_MAP[pt.pageId];
+        if (!phase) return;
+        if (!sessionPhaseTotals[phase]) sessionPhaseTotals[phase] = 0;
+        sessionPhaseTotals[phase] += pt.durationMs;
+      });
+      Object.entries(sessionPhaseTotals).forEach(([phase, ms]) => {
+        if (!phaseTotals[phase]) phaseTotals[phase] = { totalMs: 0, sessionCount: 0 };
+        phaseTotals[phase].totalMs += ms;
+        phaseTotals[phase].sessionCount++;
+      });
+    });
+    // --- Time Estimation (Post-Procedure) ---
+    const estimationStats = (() => {
+      // Collect estimation data from exploitable sessions with estimation responses
+      const withEstimates = exploitable.filter(s => {
+        const resp = {};
+        if (s.formResponses) Object.values(s.formResponses).forEach(pd => Object.assign(resp, pd));
+        const min = parseInt(resp.time_estimate_minutes) || 0;
+        const sec = parseInt(resp.time_estimate_seconds) || 0;
+        return (min > 0 || sec > 0);
+      }).map(s => {
+        const resp = {};
+        if (s.formResponses) Object.values(s.formResponses).forEach(pd => Object.assign(resp, pd));
+        const min = parseInt(resp.time_estimate_minutes) || 0;
+        const sec = parseInt(resp.time_estimate_seconds) || 0;
+        return {
+          condition: s.condition_code || 'self',
+          estimateSec: min * 60 + sec,
+          confidence: parseInt(resp.time_estimate_confidence) || null,
+          actualMs: s.applicationDurationMs || 0,
+          actualSec: Math.round((s.applicationDurationMs || 0) / 1000),
+        };
+      });
+
+      const selfData = withEstimates.filter(d => d.condition === 'self');
+      const avgData = withEstimates.filter(d => d.condition === 'average');
+
+      // Actual procedure times from all exploitable sessions (for comparison baseline)
+      const actualSecAll = appDurations.map(ms => Math.round(ms / 1000));
+      const actualMeanSec = actualSecAll.length > 0 ? Math.round(actualSecAll.reduce((a, b) => a + b, 0) / actualSecAll.length) : 0;
+      const actualMedianSec = Math.round(medianOf(actualSecAll));
+
+      const conditionStats = (data, label) => {
+        if (data.length === 0) return { label, n: 0 };
+        const estimates = data.map(d => d.estimateSec);
+        const mean = Math.round(estimates.reduce((a, b) => a + b, 0) / estimates.length);
+        const median = Math.round(medianOf(estimates));
+        const confidences = data.map(d => d.confidence).filter(c => c != null);
+        const meanConf = confidences.length > 0 ? (confidences.reduce((a, b) => a + b, 0) / confidences.length).toFixed(1) : '—';
+        // Estimation ratio: estimate / actual (>1 = overestimate, <1 = underestimate)
+        const meanRatio = actualMeanSec > 0 ? (mean / actualMeanSec).toFixed(2) : '—';
+        const medianRatio = actualMedianSec > 0 ? (median / actualMedianSec).toFixed(2) : '—';
+        return { label, n: data.length, meanEstimateSec: mean, medianEstimateSec: median, meanConfidence: meanConf, meanRatio, medianRatio };
+      };
+
+      // Self-condition individual accuracy: each person's estimate vs their own actual time
+      const selfAccuracy = (() => {
+        if (selfData.length === 0) return null;
+        const withActual = selfData.filter(d => d.actualSec > 0);
+        if (withActual.length === 0) return null;
+        const signedErrors = withActual.map(d => d.estimateSec - d.actualSec); // + = overestimate
+        const absErrors = signedErrors.map(e => Math.abs(e));
+        const ratios = withActual.map(d => d.estimateSec / d.actualSec); // >1 = overestimate
+        const meanAbsError = Math.round(absErrors.reduce((a, b) => a + b, 0) / absErrors.length);
+        const medianAbsError = Math.round(medianOf(absErrors));
+        const meanSignedBias = Math.round(signedErrors.reduce((a, b) => a + b, 0) / signedErrors.length);
+        const meanRatio = (ratios.reduce((a, b) => a + b, 0) / ratios.length).toFixed(2);
+        const medianRatio = medianOf(ratios).toFixed(2);
+        const overestimators = signedErrors.filter(e => e > 0).length;
+        const underestimators = signedErrors.filter(e => e < 0).length;
+        const exact = signedErrors.filter(e => e === 0).length;
+        return {
+          n: withActual.length,
+          meanAbsErrorSec: meanAbsError,
+          medianAbsErrorSec: medianAbsError,
+          meanSignedBiasSec: meanSignedBias,
+          meanRatio, medianRatio,
+          overestimators, underestimators, exact,
+          overPct: Math.round(overestimators / withActual.length * 100),
+          underPct: Math.round(underestimators / withActual.length * 100),
+        };
+      })();
+
+      // Confidence distribution (1–5) across all participants with estimates
+      const confidenceDistribution = [1, 2, 3, 4, 5].map(level => {
+        const selfN = selfData.filter(d => d.confidence === level).length;
+        const avgN = avgData.filter(d => d.confidence === level).length;
+        return { level, self: selfN, average: avgN, total: selfN + avgN };
+      });
+
+      // Confidence × accuracy for self-condition: do confident people estimate better?
+      const confidenceAccuracy = (() => {
+        if (selfData.length === 0) return null;
+        const withActual = selfData.filter(d => d.actualSec > 0 && d.confidence != null);
+        if (withActual.length < 3) return null; // too little data
+        // Group by confidence level
+        const byLevel = {};
+        withActual.forEach(d => {
+          if (!byLevel[d.confidence]) byLevel[d.confidence] = [];
+          byLevel[d.confidence].push(Math.abs(d.estimateSec - d.actualSec));
+        });
+        return Object.entries(byLevel)
+          .map(([level, errors]) => ({
+            level: parseInt(level),
+            n: errors.length,
+            meanAbsErrorSec: Math.round(errors.reduce((a, b) => a + b, 0) / errors.length),
+          }))
+          .sort((a, b) => a.level - b.level);
+      })();
+
+      // Between-condition comparison: which condition is closer to actual time?
+      const conditionComparison = (() => {
+        const selfStats = conditionStats(selfData, 'Self');
+        const avgStats = conditionStats(avgData, 'Average');
+        if (selfStats.n === 0 && avgStats.n === 0) return null;
+        const selfErrorVsActualMean = selfStats.n > 0 && actualMeanSec > 0
+          ? Math.round(Math.abs(selfStats.meanEstimateSec - actualMeanSec)) : null;
+        const avgErrorVsActualMean = avgStats.n > 0 && actualMeanSec > 0
+          ? Math.round(Math.abs(avgStats.meanEstimateSec - actualMeanSec)) : null;
+        let closerCondition = null;
+        if (selfErrorVsActualMean != null && avgErrorVsActualMean != null) {
+          closerCondition = selfErrorVsActualMean < avgErrorVsActualMean ? 'Self' :
+            selfErrorVsActualMean > avgErrorVsActualMean ? 'Average' : 'Tied';
+        }
+        return { selfErrorVsActualMean, avgErrorVsActualMean, closerCondition };
+      })();
+
+      // Condition balance (all sessions, not just those with estimates)
+      const allSelfCount = Object.values(sessionIndex).filter(s => s.condition_code === 'self').length;
+      const allAvgCount = Object.values(sessionIndex).filter(s => s.condition_code === 'average').length;
+
+      return {
+        conditionBalance: { self: allSelfCount, average: allAvgCount },
+        actualMeanSec, actualMedianSec,
+        self: conditionStats(selfData, 'Self'),
+        average: conditionStats(avgData, 'Average'),
+        selfAccuracy,
+        confidenceDistribution,
+        confidenceAccuracy,
+        conditionComparison,
+        totalWithEstimates: withEstimates.length,
+      };
+    })();
+
+    const phaseOrder = ['Applicant Details', 'Eligibility', 'Vehicle Details', 'Review & Submit'];
+    const phaseStats = phaseOrder
+      .filter(p => phaseTotals[p])
+      .map(p => ({
+        phase: p,
+        avgMs: Math.round(phaseTotals[p].totalMs / phaseTotals[p].sessionCount),
+        avgFormatted: fmt(phaseTotals[p].totalMs / phaseTotals[p].sessionCount),
+        medianMs: medianOf((() => {
+          // Compute per-session totals for this phase
+          const vals = [];
+          exploitable.forEach(s => {
+            if (!s.pageTimings) return;
+            let total = 0;
+            s.pageTimings.forEach(pt => { if (PHASE_MAP[pt.pageId] === p) total += pt.durationMs; });
+            if (total > 0) vals.push(total);
+          });
+          return vals;
+        })()),
+        medianFormatted: fmt(medianOf((() => {
+          const vals = [];
+          exploitable.forEach(s => {
+            if (!s.pageTimings) return;
+            let total = 0;
+            s.pageTimings.forEach(pt => { if (PHASE_MAP[pt.pageId] === p) total += pt.durationMs; });
+            if (total > 0) vals.push(total);
+          });
+          return vals;
+        })())),
+        n: phaseTotals[p].sessionCount,
+      }));
+
     res.json({
       total_sessions: all.length,
       complete_sessions: complete.length,
@@ -798,6 +1150,15 @@ app.get('/api/stats', checkKey, (req, res) => {
       quality_rejected: rejectedCount,
       quality_rejection_rate: rejectionRate,
       quality_by_field: qualityByField,
+      // Over-documentation
+      overdoc_eligibility_count: overdocEligCount,
+      overdoc_eligibility_rate: overdocEligRate,
+      overdoc_eligibility_extras: overdocEligExtrasList,
+      residence_breakdown: residenceBreakdown,
+      // Phase timing
+      phase_stats: phaseStats,
+      // Time estimation
+      estimation_stats: estimationStats,
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -887,6 +1248,57 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
   <tbody></tbody>
 </table>
 
+<h2>Document Selection Behaviour</h2>
+<p class="help">Tracks whether participants selected <strong>more documents than required</strong> (over-documentation) — a "select everything" strategy. Over-documentation does not cause rejection, but reveals cautious or confused behaviour.</p>
+<h3>Eligibility documents</h3>
+<p class="help">Required: Vehicle Registration + Insurance Certificate + Technical Inspection Report (3 documents). Extra = unnecessary documents selected.</p>
+<div id="overdoc-elig" class="stats-grid"></div>
+<div id="overdoc-elig-extras"></div>
+<h3>Residence proof</h3>
+<p class="help">Required: a utility bill issued within the last 4 months. Only the electricity bill (Nov 2025) is valid; the water bill (Sep 2025) is too old.</p>
+<div id="overdoc-residence"></div>
+
+<h2>Phase Timing</h2>
+<p class="help">Average and median time per application phase (aggregating individual pages). Computed from exploitable sessions.</p>
+<table id="phase-table">
+  <thead><tr><th>Phase</th><th>Avg Time</th><th>Median Time</th><th>N</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<h2>Time Estimation (Post-Procedure)</h2>
+<div class="legend">
+  <p style="margin:0 0 8px;font-size:13px"><strong>Design:</strong> After submitting the application, participants are asked to estimate how long the procedure took. There are two between-subjects conditions, assigned via block randomization (permuted blocks of 4):</p>
+  <dl>
+    <dt><span class="dot dot--blue"></span>Self condition</dt><dd> — participants estimate how long <strong>they personally</strong> spent completing the application.</dd>
+    <dt><span class="dot dot--green"></span>Average condition</dt><dd> — participants estimate how long <strong>an average participant</strong> would take to complete the application.</dd>
+  </dl>
+  <p style="margin:8px 0 0;font-size:12px;color:#505a5f">Both conditions ask for minutes + seconds and a confidence rating (1–5 Likert scale). The actual procedure time (used for comparison) is computed from all exploitable sessions.</p>
+</div>
+
+<h3>Condition Balance</h3>
+<p class="help">Number of participants assigned to each condition. Block randomization ensures roughly equal allocation.</p>
+<div id="estimation-balance" class="stats-grid"></div>
+
+<h3>Analysis 1: Group-Level Estimates vs Actual Procedure Time</h3>
+<p class="help">Compares the <strong>average estimate</strong> in each condition to the <strong>actual average procedure time</strong> across all exploitable sessions. The <em>Ratio</em> column shows estimate ÷ actual: a ratio of 1.00 means perfect calibration, &gt;1 means overestimation, &lt;1 means underestimation. This answers: <em>Do people think the procedure takes longer or shorter than it actually does?</em></p>
+<table id="estimation-table">
+  <thead><tr><th>Condition</th><th>N</th><th>Mean Estimate</th><th>Median Estimate</th><th>Actual Mean</th><th>Actual Median</th><th>Ratio (Mean)</th><th>Avg Confidence</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<div id="self-accuracy"></div>
+
+<div id="condition-comparison"></div>
+
+<h3>Analysis 3: Confidence Distribution</h3>
+<p class="help">How participants rated their confidence in their estimate (1 = not at all confident, 5 = extremely confident), broken down by condition.</p>
+<table id="confidence-dist-table">
+  <thead><tr><th>Confidence Level</th><th>Self</th><th>Average</th><th>Total</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<div id="confidence-accuracy"></div>
+
 <h2>Per-Page Breakdown</h2>
 <p class="help">Timing and <strong>validation errors</strong> per page. Validation errors = formatting issues caught by the form (missing fields, wrong format). These are different from quality errors above.</p>
 <table id="page-table">
@@ -960,11 +1372,11 @@ const SECTIONS = {
   'Consent': 'Consent',
   'Instructions': 'Instructions', 'Confirm instructions': 'Instructions',
   'Applicant details': 'Applicant Details',
-  'Eligibility rules': 'Eligibility', 'Eligibility decision': 'Eligibility',
+  'Eligibility rules & decision': 'Eligibility',
   'Upload eligibility docs': 'Eligibility', 'Upload residence docs': 'Eligibility',
   'Vehicle information': 'Vehicle Details', 'Vehicle category': 'Vehicle Details',
   'Vehicle fuel type': 'Vehicle Details', 'Vehicle environmental class': 'Vehicle Details',
-  'Declaration': 'Declaration',
+  'Review & submit': 'Review & Submit',
   'Application submitted': 'Post-Task', 'Ineligible (skipped)': 'Post-Task',
   'Demographics': 'Post-Task', 'Attention check': 'Post-Task',
   'Feedback': 'Post-Task', 'Debrief': 'Post-Task', 'Completion': 'Post-Task',
@@ -1083,6 +1495,41 @@ fetch('/api/stats?key='+K).then(r=>r.json()).then(s=>{
     return '<tr><td>'+f.field.replace(/_/g,' ')+'</td><td class="num">'+f.count+'</td><td class="num">'+f.rate+'%</td><td><span class="bar bar--amber" style="width:'+pct+'%">&nbsp;</span></td></tr>';
   }).join('') || '<tr><td colspan="4">No quality errors detected</td></tr>';
 
+  // Over-documentation: eligibility
+  const odEligCount = s.overdoc_eligibility_count || 0;
+  const odEligRate = s.overdoc_eligibility_rate || 0;
+  document.getElementById('overdoc-elig').innerHTML = [
+    ['Over-documented', odEligCount, odEligCount > 0 ? 'amber' : 'green'],
+    ['Over-doc Rate', odEligRate+'%', odEligRate > 50 ? 'amber' : ''],
+  ].map(([l,v,c])=>'<div class="stat'+(c?' stat--'+c:'')+'"><div class="stat-value">'+v+'</div><div class="stat-label">'+l+'</div></div>').join('');
+
+  const odExtras = s.overdoc_eligibility_extras || [];
+  if (odExtras.length > 0) {
+    document.getElementById('overdoc-elig-extras').innerHTML =
+      '<table style="margin-top:8px"><thead><tr><th>Unnecessary document selected</th><th>Count</th><th>Rate</th><th></th></tr></thead><tbody>' +
+      odExtras.map(e => {
+        const barW = Math.round(e.rate);
+        return '<tr><td>'+e.doc.replace(/_/g,' ')+'</td><td class="num">'+e.count+'</td><td class="num">'+e.rate+'%</td><td><span class="bar bar--amber" style="width:'+barW+'%">&nbsp;</span></td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+
+  // Over-documentation: residence
+  const resBkdn = s.residence_breakdown || [];
+  if (resBkdn.length > 0) {
+    document.getElementById('overdoc-residence').innerHTML =
+      '<table style="margin-top:8px"><thead><tr><th>Document chosen</th><th>Count</th><th>Rate</th><th>Correct?</th></tr></thead><tbody>' +
+      resBkdn.map(r => {
+        const cls = r.isCorrect ? 'color:#00703c;font-weight:700' : 'color:#d4351c;font-weight:700';
+        return '<tr><td>'+r.doc.replace(/_/g,' ')+'</td><td class="num">'+r.count+'</td><td class="num">'+r.rate+'%</td><td style="'+cls+'">'+(r.isCorrect ? 'Yes' : 'No')+'</td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+
+  // Phase timing table
+  const phases = s.phase_stats || [];
+  document.querySelector('#phase-table tbody').innerHTML = phases.map(p =>
+    '<tr><td><strong>'+p.phase+'</strong></td><td class="num">'+p.avgFormatted+'</td><td class="num">'+p.medianFormatted+'</td><td class="num">'+p.n+'</td></tr>'
+  ).join('') || '<tr><td colspan="4">No data yet</td></tr>';
+
   // Page table
   const pages = s.page_stats || [];
   let lastSection = '';
@@ -1105,6 +1552,108 @@ fetch('/api/stats?key='+K).then(r=>r.json()).then(s=>{
   document.querySelector('#doc-table tbody').innerHTML = ds.map(d =>
     '<tr><td>'+d.docName+'</td><td class="num">'+d.uniqueViewers+'</td><td class="num">'+d.viewedByPct+'%</td><td class="num">'+d.totalOpens+'</td><td class="num">'+d.avgTimeFormatted+'</td></tr>'
   ).join('') || '<tr><td colspan="5">No data yet</td></tr>';
+
+  // Time Estimation section
+  const est = s.estimation_stats || {};
+  const bal = est.conditionBalance || {};
+  const totalAssigned = (bal.self || 0) + (bal.average || 0);
+  const withEst = est.totalWithEstimates || 0;
+  const responseRate = totalAssigned > 0 ? Math.round(withEst / totalAssigned * 100) : 0;
+  document.getElementById('estimation-balance').innerHTML = [
+    ['Assigned to Self', bal.self || 0, 'blue'],
+    ['Assigned to Average', bal.average || 0, 'green'],
+    ['Provided an estimate', withEst + ' / ' + totalAssigned, ''],
+    ['Response rate', responseRate + '%', responseRate >= 80 ? 'green' : responseRate >= 50 ? 'amber' : 'red'],
+  ].map(([l,v,c])=>'<div class="stat'+(c?' stat--'+c:'')+'"><div class="stat-value">'+v+'</div><div class="stat-label">'+l+'</div></div>').join('');
+
+  const fmtSec = sec => { if (!sec && sec !== 0) return '—'; const m = Math.floor(sec/60); const s2 = sec % 60; return m > 0 ? m+'m '+s2+'s' : s2+'s'; };
+  const ratioColor = r => { if (r === '—') return ''; const v = parseFloat(r); if (v > 1.1) return ' style="color:#b58105;font-weight:700"'; if (v < 0.9) return ' style="color:#1d70b8;font-weight:700"'; return ' style="color:#00703c;font-weight:700"'; };
+  const estRows = [est.self, est.average].filter(c => c && c.n > 0);
+  document.querySelector('#estimation-table tbody').innerHTML = estRows.map(c =>
+    '<tr><td><strong>'+c.label+'</strong></td><td class="num">'+c.n+'</td><td class="num">'+fmtSec(c.meanEstimateSec)+'</td><td class="num">'+fmtSec(c.medianEstimateSec)+'</td><td class="num">'+fmtSec(est.actualMeanSec)+'</td><td class="num">'+fmtSec(est.actualMedianSec)+'</td><td class="num"'+ratioColor(c.meanRatio)+'>'+c.meanRatio+'</td><td class="num">'+c.meanConfidence+' / 5</td></tr>'
+  ).join('') || '<tr><td colspan="8">No estimation data yet</td></tr>';
+
+  // Self-condition individual accuracy
+  const acc = est.selfAccuracy;
+  if (acc) {
+    const biasDir = acc.meanSignedBiasSec > 0 ? 'overestimation' : acc.meanSignedBiasSec < 0 ? 'underestimation' : 'no bias';
+    const biasColor = acc.meanSignedBiasSec > 0 ? 'amber' : acc.meanSignedBiasSec < 0 ? 'blue' : 'green';
+    document.getElementById('self-accuracy').innerHTML =
+      '<h3>Analysis 2: Self-Condition Individual Accuracy</h3>'+
+      '<p class="help"><strong>What this does:</strong> For each participant in the <em>Self</em> condition, we compute: <code>error = their estimate &minus; their own actual procedure time</code>. This is a <strong>within-subject</strong> analysis — each person is compared to themselves, not to the group average. It answers: <em>Can people accurately perceive how long they personally spent?</em></p>'+
+      '<p class="help"><strong>Why it matters:</strong> Analysis 1 compares group averages, which can hide individual errors that cancel out. This analysis reveals the typical magnitude of individual errors and whether people systematically overestimate or underestimate their own time.</p>'+
+      '<div class="stats-grid">'+
+        '<div class="stat stat--'+biasColor+'"><div class="stat-value">'+(acc.meanSignedBiasSec > 0 ? '+' : '')+fmtSec(Math.abs(acc.meanSignedBiasSec))+'</div><div class="stat-label">Mean Signed Error</div></div>'+
+        '<div class="stat"><div class="stat-value">'+fmtSec(acc.meanAbsErrorSec)+'</div><div class="stat-label">Mean Absolute Error</div></div>'+
+        '<div class="stat"><div class="stat-value">'+fmtSec(acc.medianAbsErrorSec)+'</div><div class="stat-label">Median Absolute Error</div></div>'+
+        '<div class="stat"><div class="stat-value">'+acc.meanRatio+'x</div><div class="stat-label">Mean Ratio (est ÷ actual)</div></div>'+
+      '</div>'+
+      '<div class="legend" style="margin-top:12px">'+
+        '<dl>'+
+        '<dt>Mean Signed Error</dt><dd> — average of (estimate &minus; actual) across all self-condition participants. Positive = systematic overestimation, negative = systematic underestimation. Currently: <strong style="color:'+(biasColor==='amber'?'#b58105':biasColor==='blue'?'#1d70b8':'#00703c')+'">'+biasDir+'</strong>.</dd>'+
+        '<dt>Mean Absolute Error</dt><dd> — average of |estimate &minus; actual|, ignoring direction. Shows how far off people are on average regardless of whether they over- or underestimate.</dd>'+
+        '<dt>Median Absolute Error</dt><dd> — same as above but using the median, which is more robust to outliers (one participant wildly off won&#39;t skew this).</dd>'+
+        '<dt>Mean Ratio</dt><dd> — average of (estimate ÷ actual). A value of 1.00x = perfect accuracy, 1.50x = people estimate 50% more than their real time, 0.70x = people estimate 30% less.</dd>'+
+        '</dl>'+
+      '</div>'+
+      '<p class="help" style="margin-top:8px"><strong>Direction breakdown (N='+acc.n+'):</strong> '+acc.overPct+'% overestimated their time ('+acc.overestimators+'/'+acc.n+'), '+acc.underPct+'% underestimated ('+acc.underestimators+'/'+acc.n+')'+(acc.exact > 0 ? ', '+acc.exact+' were exact' : '')+'.</p>';
+  } else {
+    document.getElementById('self-accuracy').innerHTML =
+      '<h3>Analysis 2: Self-Condition Individual Accuracy</h3>'+
+      '<p class="help"><strong>What this will do:</strong> For each participant in the <em>Self</em> condition, this analysis computes <code>error = their estimate &minus; their own actual procedure time</code>. This is a within-subject comparison — each person compared to themselves. It will show whether people systematically overestimate or underestimate their own time, and by how much.</p>'+
+      '<p class="help">No self-condition estimation data yet.</p>';
+  }
+
+  // Between-condition comparison
+  const cmp = est.conditionComparison;
+  if (cmp) {
+    const selfErr = cmp.selfErrorVsActualMean;
+    const avgErr = cmp.avgErrorVsActualMean;
+    const closer = cmp.closerCondition;
+    let verdictHtml = '';
+    if (closer && selfErr != null && avgErr != null) {
+      const verdictColor = closer === 'Self' ? 'color:#1d70b8' : closer === 'Average' ? 'color:#00703c' : 'color:#505a5f';
+      verdictHtml = '<p class="help" style="margin-top:10px"><strong style="'+verdictColor+'">'+
+        (closer === 'Tied' ? 'Both conditions are equally close to actual time.' :
+        'The <em>'+closer+'</em> condition is closer to the actual mean procedure time.')+
+        '</strong> Self-condition mean is off by '+fmtSec(selfErr)+', Average-condition mean is off by '+fmtSec(avgErr)+'.</p>';
+    }
+    document.getElementById('condition-comparison').innerHTML =
+      '<h3>Between-Condition Comparison</h3>'+
+      '<p class="help">Which framing produces estimates closer to the actual procedure time? Compares each condition&#39;s mean estimate to the actual mean time across all exploitable sessions.</p>'+
+      '<div class="stats-grid">'+
+        (selfErr != null ? '<div class="stat'+(closer==='Self'?' stat--blue':'')+'"><div class="stat-value">'+fmtSec(selfErr)+'</div><div class="stat-label">Self: distance from actual mean</div></div>' : '')+
+        (avgErr != null ? '<div class="stat'+(closer==='Average'?' stat--green':'')+'"><div class="stat-value">'+fmtSec(avgErr)+'</div><div class="stat-label">Average: distance from actual mean</div></div>' : '')+
+      '</div>'+verdictHtml;
+  }
+
+  // Confidence distribution table
+  const confDist = est.confidenceDistribution || [];
+  const confLabels = {1:'1 — Not at all confident', 2:'2', 3:'3 — Moderately confident', 4:'4', 5:'5 — Extremely confident'};
+  document.querySelector('#confidence-dist-table tbody').innerHTML = confDist.map(c =>
+    '<tr><td>'+confLabels[c.level]+'</td><td class="num">'+c.self+'</td><td class="num">'+c.average+'</td><td class="num"><strong>'+c.total+'</strong></td></tr>'
+  ).join('') || '<tr><td colspan="4">No data yet</td></tr>';
+
+  // Confidence × accuracy (self-condition only)
+  const confAcc = est.confidenceAccuracy;
+  if (confAcc && confAcc.length > 0) {
+    const maxErr = Math.max(...confAcc.map(c => c.meanAbsErrorSec), 1);
+    document.getElementById('confidence-accuracy').innerHTML =
+      '<h3>Analysis 4: Does Confidence Predict Accuracy? (Self-Condition)</h3>'+
+      '<p class="help">For self-condition participants only: does reporting higher confidence correspond to a more accurate estimate? Shows the mean absolute error (estimate minus actual time) at each confidence level. Lower error = more accurate.</p>'+
+      '<table><thead><tr><th>Confidence Level</th><th>N</th><th>Mean Absolute Error</th><th></th></tr></thead><tbody>'+
+      confAcc.map(c => {
+        const barW = Math.round(c.meanAbsErrorSec / maxErr * 100);
+        const color = c.meanAbsErrorSec < maxErr * 0.5 ? 'green' : c.meanAbsErrorSec < maxErr * 0.8 ? 'amber' : 'red';
+        return '<tr><td>'+confLabels[c.level]+'</td><td class="num">'+c.n+'</td><td class="num">'+fmtSec(c.meanAbsErrorSec)+'</td><td><span class="bar bar--'+color+'" style="width:'+barW+'%">&nbsp;</span></td></tr>';
+      }).join('')+
+      '</tbody></table>'+
+      '<p class="help" style="margin-top:8px;font-size:12px;color:#505a5f">If confidence tracks accuracy, higher confidence levels should show smaller errors. A flat pattern suggests metacognitive miscalibration — people feel confident but aren&#39;t actually more accurate.</p>';
+  } else {
+    document.getElementById('confidence-accuracy').innerHTML =
+      '<h3>Analysis 4: Does Confidence Predict Accuracy? (Self-Condition)</h3>'+
+      '<p class="help">Not enough self-condition data yet (minimum 3 participants needed). This analysis will show whether more confident participants estimate more accurately.</p>';
+  }
 
   // Drop-off table
   const dropOffs = s.drop_off || [];

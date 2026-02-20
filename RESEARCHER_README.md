@@ -14,9 +14,9 @@ Participants are told they are role-playing as a resident of the fictional count
 
 They receive a set of **6 fictional personal documents** (driving license, vehicle registration, insurance certificate, technical inspection report, electricity bill, water bill) displayed in a collapsible side panel. Clicking a document opens it in a **slide-out drawer** with zoom controls (zoom in/out buttons, reset, and Ctrl+scroll wheel), making it easy to read fine details. The application requires them to locate specific information in these documents and enter it into the form — mimicking the real experience of filling out government paperwork with documents at hand.
 
-A **progress stepper** at the top of the page shows participants which section they're in (Applicant details → Eligibility → Vehicle details → Declaration → Submit). The stepper is only visible during the main application procedure — it does not appear on consent, instruction, post-task, or completion pages.
+A **progress stepper** at the top of the page shows participants which section they're in (Applicant details → Eligibility → Vehicle details → Review & Submit). The stepper is only visible during the main application procedure — it does not appear on consent, instruction, post-task, or completion pages.
 
-### Procedure flow (20 pages, with conditional skip)
+### Procedure flow (18 pages, with conditional skip)
 
 | # | Page | What happens |
 |---|------|-------------|
@@ -24,26 +24,24 @@ A **progress stepper** at the top of the page shows participants which section t
 | 2 | **Instructions** | Role-play briefing: who they are, what they need to do |
 | 3 | **Confirm instructions** | Comprehension check before starting |
 | 4 | **Applicant details** | Full name, date of birth, national ID (format: `ID-XXXXXX`), address, email, phone |
-| 5 | **Eligibility rules** | Complex eligibility criteria to read and understand |
-| 6 | **Eligibility decision** | Must assess whether they are eligible based on the rules. **If "No" → skip to page 15** |
-| 7 | **Document upload — eligibility** | Upload supporting documents for eligibility |
-| 8 | **Document upload — residence** | Upload proof of residence |
-| 9 | **Vehicle information** | Registration number (format: `AB-123-CD`), make, model, year |
-| 10 | **Vehicle category** | Select vehicle category from a list |
-| 11 | **Vehicle fuel type** | Select fuel type |
-| 12 | **Vehicle environmental class** | Select environmental classification |
-| 13 | **Declaration** | Read and accept terms |
-| 14 | **Submit** | Confirmation screen (application submitted) |
-| 15 | **Ineligible end** | Shown only if participant selected "No" — explains application cannot proceed |
-| 16 | **Demographics** | Post-task: age, gender, education, employment |
-| 17 | **Attention check** | Post-task quality check |
-| 18 | **Feedback** | Post-task: perceived difficulty, frustration, time perception |
-| 19 | **Debrief** | Explanation of the study purpose |
-| 20 | **Completion** | Prolific redirect button |
+| 5 | **Eligibility rules + decision** | Complex eligibility criteria followed by eligibility assessment on the same page. **If "No" → skip to page 13** |
+| 6 | **Document upload — eligibility** | Upload supporting documents for eligibility |
+| 7 | **Document upload — residence** | Upload proof of residence |
+| 8 | **Vehicle information** | Registration number (format: `AB-123-CD`), make, model, year |
+| 9 | **Vehicle category** | Select vehicle category from a list |
+| 10 | **Vehicle fuel type** | Select fuel type |
+| 11 | **Vehicle environmental class** | Select environmental classification |
+| 12 | **Review & submit** | Full application summary (all entered data) + declaration of accuracy checkboxes + submit button |
+| 13 | **Ineligible end** | Shown only if participant selected "No" — explains application cannot proceed |
+| 14 | **Demographics** | Post-task: age, gender, education, employment |
+| 15 | **Attention check** | Post-task quality check |
+| 16 | **Feedback** | Post-task: perceived difficulty, frustration, time perception |
+| 17 | **Debrief** | Explanation of the study purpose |
+| 18 | **Completion** | Prolific redirect button |
 
-Pages 4–13 show the **document reference panel** on the right side. Pages 16–19 are post-task measures (no documents).
+Pages 4–12 show the **document reference panel** on the right side. Pages 14–17 are post-task measures (no documents).
 
-**Ineligibility skip**: If a participant selects "No — the applicant is not eligible" on page 6, they skip pages 7–14 entirely and land on the "Ineligible end" page (15), then continue to post-task questions. Their session is flagged as `ineligible_skipped=yes` in the CSV and their timing data is excluded from the main procedure timing averages. The correct answer is "Yes" (eligible), so this also counts as a quality error.
+**Ineligibility skip**: If a participant selects "No — the applicant is not eligible" on page 5, they skip pages 6–12 entirely and land on the "Ineligible end" page (13), then continue to post-task questions. Their session is flagged as `ineligible_skipped=yes` in the CSV and their timing data is excluded from the main procedure timing averages. The correct answer is "Yes" (eligible), so this also counts as a quality error.
 
 ---
 
@@ -81,7 +79,7 @@ Pages 4–13 show the **document reference panel** on the right side. Pages 16�
 **Session metadata:**
 - Prolific PID, study ID, condition code
 - Device info (screen size, browser, timezone, language)
-- Consent status, completion status (`complete` / `partial` / `incomplete`)
+- Consent status, completion status (`complete` / `submitted` / `ineligible` / `dropped` / `incomplete`)
 
 **All data is per-participant.** The dashboard and CSV export aggregate timing and error data per session first, so each participant is counted once per page — not once per visit. This means the average time on a page reflects what a typical participant spent on it in total, even if some participants visited it multiple times.
 
@@ -183,7 +181,7 @@ Replace `XXXXXXX` with the actual completion code from your Prolific study setup
 ```bash
 npm install
 npm start
-# Opens on http://localhost:3000
+# Opens on http://localhost:3001
 ```
 
 ### Deployment

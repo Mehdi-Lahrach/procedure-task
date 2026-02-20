@@ -9,12 +9,12 @@ Built for Hugo's sludge audit research with the OECD — measuring the costs of 
 ## Quick Start
 
 ```bash
-cd sludge-experiment
+cd "procedure task"
 npm install
 npm start
-# → Procedure: http://localhost:3000
-# → Dashboard: http://localhost:3000/dashboard?key=research2025
-# → CSV Export: http://localhost:3000/api/export/csv?key=research2025
+# → Procedure: http://localhost:3001
+# → Dashboard: http://localhost:3001/dashboard?key=research2025
+# → CSV Export: http://localhost:3001/api/export/csv?key=research2025
 ```
 
 Requires **Node.js 18+**.
@@ -105,8 +105,8 @@ A fictional but realistic 19-page government application for a "Green Zone Vehic
 - Vehicle information (registration, make/model, fuel type, insurance)
 - Complex eligibility rules with specific format requirements (e.g., ID format `ID-XXXXXX`, registration format `AB-123-CD`)
 - Document reference panel showing 6 fictional document images (accordion panel + slide-out drawer with zoom)
-- Configurable section stepper: `stepperSections: ['Applicant details', 'Eligibility', 'Vehicle details', 'Declaration', 'Submit']`
-- Declaration and review page
+- Configurable section stepper: `stepperSections: ['Applicant details', 'Eligibility', 'Vehicle details', 'Review & Submit']`
+- Combined review + declaration page (participants review all answers, then tick declaration checkboxes and submit)
 - Post-task questionnaires (demographics, attention check, feedback, debrief)
 - Prolific redirect on completion
 
@@ -115,7 +115,7 @@ A fictional but realistic 19-page government application for a "Green Zone Vehic
 - **Session management**: Create, consent, progress (save), resume, complete
 - **Session persistence**: In-memory `sessionIndex` cache with `sessions.jsonl` (creation) + `sessions_updates.jsonl` (updates). `getMergedSessions()` merges base + updates for a unified view.
 - **Duplicate prevention**: Resume endpoint detects already-completed sessions and returns `already_complete` flag
-- **Completion status**: Each session is classified as `complete` (all pages finished), `partial` (consent given but not finished), or `incomplete` (no consent). Drop-off page tracked for partial sessions.
+- **Completion status**: Each session is classified as `complete` (finished everything including post-task + Prolific redirect), `submitted` (submitted the application but dropped before finishing post-task — procedure data still exploitable), `ineligible` (selected "not eligible"), `dropped` (consented but did not submit), or `incomplete` (did not consent/barely started). Drop-off page tracked for partial sessions.
 - **Event ingestion**: Batch endpoint accepting all event types → stored as JSONL files
 - **Application quality scoring**: Each submitted application is automatically checked against an answer key derived from the fictional documents (name, DOB, national ID, eligibility decision, supporting documents, vehicle registration, owner type, category, fuel type, environmental class). Distinguishes substantive errors (wrong information → rejection) from formatting errors caught during the procedure.
 - **Per-participant aggregation**: Stats and dashboard aggregate page timings and errors per-session first (one count per participant per page, not per visit)
@@ -156,6 +156,7 @@ The `/api/export/csv` endpoint produces **one row per session** with columns:
 - **Per-document**: `doc_{docId}_opens`, `doc_{docId}_totalMs` for each document
 - **Per-page errors**: `errors_{pageId}` for each page
 - **Application quality scoring**: `quality_errors` (count of substantive errors), `quality_would_reject` (`yes`/`no`), `quality_error_fields` (semicolon-separated list), `quality_error_details` (submitted vs. expected for each error), `ineligible_skipped` (`yes`/`no`)
+- **Over-documentation**: `overdoc_eligibility` (`yes`/`no`), `overdoc_eligibility_extras` (extra docs selected), `overdoc_eligibility_total_selected`, `overdoc_residence`, `overdoc_residence_selected`
 - **Form responses**: One column per form field name, values flattened across pages
 
 ---
@@ -246,10 +247,10 @@ The panel uses `<details>` elements with class `document-accordion` and `data-do
 
 | Setting | Location | Default |
 |---------|----------|---------|
-| Port | `PORT` env var | `3000` |
+| Port | `PORT` env var | `3001` |
 | Export key | `EXPORT_KEY` env var | `research2025` |
 | Prolific URL | `procedure_greenzone.js` → `prolificCompletionUrl` | Placeholder |
-| Stepper sections | `procedure_greenzone.js` → `stepperSections` | `['Applicant details', 'Eligibility', 'Vehicle details', 'Declaration', 'Submit']` |
+| Stepper sections | `procedure_greenzone.js` → `stepperSections` | `['Applicant details', 'Eligibility', 'Vehicle details', 'Review & Submit']` |
 | Flush interval | `index.html` → tracker options → `flushInterval` | 10000ms |
 | Government name | `index.html` header | GOV.NEWLAND |
 

@@ -74,11 +74,13 @@ class SludgeTracker {
           }
           // Resume existing session
           this.sessionId = resumeData.session_id;
+          this.condition = resumeData.condition || null;
           this.sessionStartTime = Date.now();
           this._setCookie('sludge_session_id', this.sessionId, 7);
           this._startFlushing();
           return {
             sessionId: this.sessionId,
+            condition: this.condition,
             resumeState: {
               currentPageIndex: resumeData.currentPageIndex || 0,
               formData: resumeData.formData || {},
@@ -110,10 +112,11 @@ class SludgeTracker {
       });
       const data = await resp.json();
       this.sessionId = data.session_id;
+      this.condition = data.condition || null;
       this.sessionStartTime = Date.now();
       this._setCookie('sludge_session_id', this.sessionId, 7);
       this._startFlushing();
-      return { sessionId: this.sessionId };
+      return { sessionId: this.sessionId, condition: this.condition };
     } catch (e) {
       console.error('Tracker init failed:', e);
       return null;
@@ -124,7 +127,7 @@ class SludgeTracker {
   // PROGRESS PERSISTENCE
   // ============================================================
 
-  async saveProgress(currentPageIndex, formData) {
+  async saveProgress(currentPageIndex, formData, currentPageId) {
     if (!this.sessionId) return;
     try {
       await fetch(`${this.apiBase}/api/session/progress`, {
@@ -133,11 +136,70 @@ class SludgeTracker {
         body: JSON.stringify({
           session_id: this.sessionId,
           currentPageIndex,
+          currentPageId: currentPageId || null,
           formData,
         }),
       });
     } catch (e) {
       console.warn('Failed to save progress:', e);
+    }
+  }
+
+  /**
+   * Send a snapshot of current tracker data (timing, errors, documents, form responses).
+   * Called when the application is submitted so that "submitted" sessions have their data
+   * available for the dashboard even if the participant drops out before final completion.
+   */
+  async sendSnapshot() {
+    if (!this.sessionId) return;
+
+    // Close the current page entry so its timing is included
+    const currentEntry = this.currentPageEntry;
+    if (currentEntry && !currentEntry.exitTime) {
+      currentEntry.exitTime = Date.now();
+      currentEntry.durationMs = currentEntry.exitTime - currentEntry.entryTime;
+    }
+
+    const totalDurationMs = Date.now() - this.sessionStartTime;
+
+    // Aggregate page timings (same logic as completeSession)
+    const pageSummary = this.pageTimings.map(t => ({
+      pageId: t.pageId, entryTime: t.entryTime, exitTime: t.exitTime || Date.now(), durationMs: t.durationMs || (Date.now() - t.entryTime),
+    }));
+
+    const nonAppPages = ['consent', 'instructions', 'confirm_instructions',
+      'application_submitted', 'demographics', 'attention_check',
+      'feedback', 'debrief', 'completion'];
+    const applicationDurationMs = pageSummary
+      .filter(t => !nonAppPages.includes(t.pageId))
+      .reduce((sum, t) => sum + t.durationMs, 0);
+
+    try {
+      await fetch(`${this.apiBase}/api/session/snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: this.sessionId,
+          totalDurationMs,
+          applicationDurationMs,
+          totalDocTimeMs: this.docInteractions.reduce((s, d) => s + d.durationMs, 0),
+          totalDocOpens: this.docInteractions.length,
+          totalErrors: this.totalErrors,
+          errorCountsByPage: this.errorCountsByPage,
+          errorCountsByField: this.errorCountsByField,
+          pageTimings: this.pageTimings,
+          docInteractions: this.docInteractions,
+          formResponses: this.formResponses,
+        }),
+      });
+    } catch (e) {
+      console.warn('Failed to send snapshot:', e);
+    }
+
+    // Re-open the current page entry so tracking continues
+    if (currentEntry && currentEntry.exitTime) {
+      currentEntry.exitTime = null;
+      currentEntry.durationMs = 0;
     }
   }
 

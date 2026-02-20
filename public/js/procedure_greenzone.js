@@ -18,6 +18,30 @@
  */
 
 // ============================================================
+// TIME ESTIMATION PROMPTS (condition-dependent)
+// ============================================================
+// The body text for the time_estimation page is swapped at init
+// based on the assigned condition (self vs average).
+
+const TIME_ESTIMATION_PROMPT_SELF = `
+<div class="estimation-prompt">
+  <p class="gov-body"><strong>Before we ask you a few final questions, we would like you to estimate how long you spent on the application.</strong></p>
+  <p class="gov-body">Based on your own experience, please estimate how much time <strong>you personally</strong> spent completing the permit application in this exercise.</p>
+  <p class="gov-body">Include only the time spent on the application itself — from filling in your personal details through to submitting. Do not include time spent on consent, general instructions, or the questions that follow.</p>
+  <p class="gov-body">Please be <strong>as precise as possible</strong> — use both the minutes and seconds fields to give your best estimate.</p>
+</div>
+`;
+
+const TIME_ESTIMATION_PROMPT_AVERAGE = `
+<div class="estimation-prompt">
+  <p class="gov-body"><strong>Before we ask you a few final questions, we would like you to estimate how long the application takes to complete.</strong></p>
+  <p class="gov-body">Based on the steps and requirements you encountered in this task, please estimate how long <strong>an average participant</strong> would take to complete the permit application.</p>
+  <p class="gov-body">Include only the time needed for the application itself — from filling in personal details through to submitting. Do not include time spent on consent, general instructions, or the questions that follow.</p>
+  <p class="gov-body">Please be <strong>as precise as possible</strong> — use both the minutes and seconds fields to give your best estimate.</p>
+</div>
+`;
+
+// ============================================================
 // FICTIONAL DOCUMENTS (embedded as viewable pages)
 // ============================================================
 // Instead of external Google Drive links, documents are built into
@@ -164,16 +188,16 @@ const GREENZONE_PROCEDURE = {
   prolificCompletionUrl: 'https://app.prolific.com/submissions/complete?cc=XXXXXXX',
 
   // Stepper: only show these sections in the progress stepper
-  stepperSections: ['Applicant details', 'Eligibility', 'Vehicle details', 'Declaration', 'Submit'],
+  stepperSections: ['Applicant details', 'Eligibility', 'Vehicle details', 'Review & Submit'],
 
   // Show documents panel on application pages
   showDocumentsPanel: true,
   documentsPanelHtml: buildDocumentsPanel(),
   documentsPanelPages: [
-    'applicant_details', 'eligibility_rules', 'eligibility_decision',
+    'applicant_details', 'eligibility_rules',
     'doc_upload_eligibility', 'doc_upload_residence',
     'vehicle_info', 'vehicle_category', 'vehicle_fuel',
-    'vehicle_env_class', 'declaration'
+    'vehicle_env_class', 'application_review'
   ],
 
   pages: [
@@ -208,17 +232,19 @@ const GREENZONE_PROCEDURE = {
       section: 'Instructions',
       title: 'Before you begin',
       customHtml: `
-        <div class="gov-panel gov-panel--info" style="background: #f3f2f1; padding: 20px; margin-bottom: 20px;">
-          <h2 class="gov-heading-m" style="margin-top: 0;">Application Context Notice</h2>
+        <div style="background: #fef3cd; border: 3px solid #e67700; border-radius: 8px; padding: 20px 24px; margin-bottom: 24px;">
+          <h2 class="gov-heading-m" style="margin-top: 0; color: #b54d00;">Application Context Notice</h2>
           <p class="gov-body">This task is part of a research study. You are <strong>not</strong> completing an application for yourself.</p>
-          <p class="gov-body">You are asked to <strong>role-play a fictional individual</strong> and complete an administrative application <strong>on their behalf</strong>.</p>
+          <p class="gov-body" style="margin-bottom: 0;">You are asked to <strong>role-play a fictional individual</strong> and complete an administrative application <strong>on their behalf</strong>.</p>
         </div>
 
-        <div class="gov-warning-text">
-          <span class="gov-warning-text__icon" aria-hidden="true">!</span>
-          <strong class="gov-warning-text__text">
-            For this task, you must not enter any of your own personal information (such as your name, address, identification number, or vehicle details). All information entered in the form must correspond only to the fictional person described in the documents provided to you.
-          </strong>
+        <div style="background: #fde8e8; border: 3px solid #d4351c; border-radius: 8px; padding: 16px 20px; margin-bottom: 24px;">
+          <div style="display: flex; align-items: flex-start; gap: 12px;">
+            <span style="background: #d4351c; color: white; font-weight: 700; font-size: 20px; min-width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">!</span>
+            <strong style="color: #942514; line-height: 1.5;">
+              For this task, you must not enter any of your own personal information (such as your name, address, identification number, or vehicle details). All information entered in the form must correspond only to the fictional person described in the documents provided to you.
+            </strong>
+          </div>
         </div>
 
         <h2 class="gov-heading-m">Scenario</h2>
@@ -236,11 +262,11 @@ const GREENZONE_PROCEDURE = {
           <li>Use the same wording, numbers, dates, and formats shown in the documents.</li>
         </ol>
 
-        <div class="gov-warning-text">
-          <span class="gov-warning-text__icon" aria-hidden="true">!</span>
-          <strong class="gov-warning-text__text">
-            Do not use your own personal details at any point.
-          </strong>
+        <div style="background: #fde8e8; border: 2px solid #d4351c; border-radius: 8px; padding: 14px 18px;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span style="background: #d4351c; color: white; font-weight: 700; font-size: 18px; min-width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">!</span>
+            <strong style="color: #942514;">Do not use your own personal details at any point.</strong>
+          </div>
         </div>
       `,
       buttonText: 'Continue',
@@ -317,18 +343,18 @@ const GREENZONE_PROCEDURE = {
     },
 
     // ============================================================
-    // APPLICATION: ELIGIBILITY
+    // APPLICATION: ELIGIBILITY (rules + decision on same page)
     // ============================================================
     {
       id: 'eligibility_rules',
-      type: 'info',
+      type: 'form',
       section: 'Eligibility',
       allowBack: true,
       title: 'Eligibility and documentation standards',
-      customHtml: `
+      body: `
         <div class="gov-inset-text" style="border-left-color: #1d70b8;">
-          <p class="gov-body" style="margin-bottom: 4px;"><strong>Please read the following rules carefully before proceeding.</strong></p>
-          <p class="gov-body" style="margin-bottom: 0;">You will be asked to determine whether the applicant is eligible based on these criteria.</p>
+          <p class="gov-body" style="margin-bottom: 4px;"><strong>Please read the following rules carefully.</strong></p>
+          <p class="gov-body" style="margin-bottom: 0;">After reading, you must determine whether the applicant is eligible based on these criteria.</p>
         </div>
 
         <h2 class="gov-heading-m">1. General prerequisites</h2>
@@ -349,17 +375,11 @@ const GREENZONE_PROCEDURE = {
         <h2 class="gov-heading-m">4. Vehicles required to apply</h2>
         <p class="gov-body">Vehicles registered <strong>before 1 January 2018</strong> are required to apply and must provide proof of the registration date.</p>
         <p class="gov-body">Vehicles with a <strong>hybrid fuel type</strong> must also provide an additional technical report.</p>
-      `,
-      buttonText: 'Continue',
-    },
 
-    {
-      id: 'eligibility_decision',
-      type: 'form',
-      section: 'Eligibility',
-      allowBack: true,
-      title: 'Eligibility assessment',
-      body: '<p class="gov-body">Based on the information provided in the case file and the eligibility rules on the previous page, determine whether the applicant is eligible for the Municipal Green Zone Vehicle Access Permit.</p>',
+        <hr class="gov-section-break gov-section-break--l gov-section-break--visible">
+        <h2 class="gov-heading-m">Eligibility assessment</h2>
+        <p class="gov-body">Based on the information provided in the case file and the rules above, determine whether the applicant is eligible for the Municipal Green Zone Vehicle Access Permit.</p>
+      `,
       fields: [
         {
           name: 'is_eligible',
@@ -562,15 +582,57 @@ const GREENZONE_PROCEDURE = {
     },
 
     // ============================================================
-    // DECLARATION
+    // REVIEW, DECLARATION & SUBMIT (combined)
     // ============================================================
     {
-      id: 'declaration',
-      type: 'form',
-      section: 'Declaration',
+      id: 'application_review',
+      type: 'review',
+      section: 'Review & Submit',
       allowBack: true,
-      title: 'Declaration of accuracy',
-      body: `
+      title: 'Review and submit your application',
+      description: 'Please check your answers carefully. Make sure all information matches the official documents.',
+      sections: [
+        {
+          title: 'Applicant details',
+          fields: [
+            { name: 'first_name', label: 'First name' },
+            { name: 'last_name', label: 'Last name' },
+            { name: 'date_of_birth', label: 'Date of birth' },
+            { name: 'national_id', label: 'National identification number' },
+          ],
+        },
+        {
+          title: 'Eligibility',
+          fields: [
+            { name: 'is_eligible', label: 'Eligible for the permit?' },
+          ],
+        },
+        {
+          title: 'Supporting documents — eligibility',
+          fields: [
+            { name: 'eligibility_documents', label: 'Documents selected' },
+          ],
+        },
+        {
+          title: 'Supporting documents — residence',
+          fields: [
+            { name: 'residence_document', label: 'Proof of residence' },
+          ],
+        },
+        {
+          title: 'Vehicle details',
+          fields: [
+            { name: 'vehicle_registration_number', label: 'Registration number' },
+            { name: 'vehicle_owner_type', label: 'Owner type' },
+            { name: 'vehicle_category', label: 'Vehicle category' },
+            { name: 'vehicle_fuel_type', label: 'Fuel type' },
+            { name: 'vehicle_env_classification', label: 'Environmental classification' },
+          ],
+        },
+      ],
+      customHtml: `
+        <hr class="gov-section-break gov-section-break--l gov-section-break--visible">
+        <h2 class="gov-heading-m">Declaration of accuracy</h2>
         <p class="gov-body">Before submitting your application, you must confirm the following.</p>
         <div class="gov-warning-text">
           <span class="gov-warning-text__icon" aria-hidden="true">!</span>
@@ -585,11 +647,12 @@ const GREENZONE_PROCEDURE = {
           label: '',
           type: 'checkbox',
           required: true,
+          requireAll: true,
           options: [
             { value: 'confirmed', label: 'I confirm that the information provided in this application is complete and accurate and matches the official documents referenced.' },
             { value: 'acknowledge', label: 'I acknowledge that any false declaration may result in the rejection of my application.' },
           ],
-          errorMessage: 'You must confirm both declarations to submit your application.',
+          errorMessage: 'You must tick both checkboxes to submit your application.',
         },
       ],
       buttonText: 'Submit application',
@@ -600,24 +663,93 @@ const GREENZONE_PROCEDURE = {
     // ============================================================
     {
       id: 'application_submitted',
-      type: 'info',
+      type: 'form',
       section: 'Submit',
-      allowBack: true,
+      allowBack: false,
       title: 'Application submitted',
+      // Body is set dynamically at init: confirmation panel + condition-specific estimation prompt
+      body: '<p class="gov-body">Loading...</p>',
       customHtml: `
-        <div class="gov-panel gov-panel--confirmation">
-          <h1 class="gov-panel__title">Application submitted</h1>
-          <div class="gov-panel__body">
-            Reference number<br><strong>GZ-2025-00481</strong>
+        <div class="estimation-block">
+          <div class="estimation-block__input-row">
+            <div class="estimation-block__input-group">
+              <label class="estimation-block__label" for="time_estimate_minutes">Minutes</label>
+              <input type="number" id="time_estimate_minutes" name="time_estimate_minutes"
+                     class="estimation-block__input" min="0" max="999" placeholder="–">
+              <span class="estimation-block__unit">min</span>
+            </div>
+            <div class="estimation-block__input-group">
+              <label class="estimation-block__label" for="time_estimate_seconds">Seconds</label>
+              <input type="number" id="time_estimate_seconds" name="time_estimate_seconds"
+                     class="estimation-block__input" min="0" max="59" placeholder="–">
+              <span class="estimation-block__unit">sec</span>
+            </div>
+          </div>
+          <div class="estimation-block__confidence" id="confidence-section">
+            <p class="estimation-block__confidence-label">How confident are you in this estimate?</p>
+            <div class="likert-scale">
+              <span class="likert-scale__anchor">Not at all<br>confident</span>
+              <div class="likert-scale__buttons">
+                <button type="button" class="likert-btn" data-value="1">1</button>
+                <button type="button" class="likert-btn" data-value="2">2</button>
+                <button type="button" class="likert-btn" data-value="3">3</button>
+                <button type="button" class="likert-btn" data-value="4">4</button>
+                <button type="button" class="likert-btn" data-value="5">5</button>
+              </div>
+              <span class="likert-scale__anchor">Extremely<br>confident</span>
+            </div>
+            <input type="hidden" name="time_estimate_confidence" id="time_estimate_confidence" value="">
           </div>
         </div>
-        <p class="gov-body">Your application for a Municipal Green Zone Vehicle Access Permit has been submitted. You will receive confirmation within 10 working days.</p>
-        <hr class="gov-section-break gov-section-break--l gov-section-break--visible">
-        <h2 class="gov-heading-m">Thank you</h2>
-        <p class="gov-body">You have now finished the fictional application used in this study.</p>
-        <p class="gov-body">The following questions are about <strong>you specifically</strong> and <strong>your background</strong>. They are not part of the fictional scenario.</p>
       `,
-      buttonText: 'Continue to final questions',
+      fields: [
+        { name: 'time_estimate_minutes', label: 'Minutes', type: 'number', required: false, render: false },
+        { name: 'time_estimate_seconds', label: 'Seconds', type: 'number', required: false, render: false },
+        { name: 'time_estimate_confidence', label: 'Confidence', type: 'hidden', required: false, render: false },
+      ],
+      validation: (formData) => {
+        const minRaw = formData.time_estimate_minutes;
+        const secRaw = formData.time_estimate_seconds;
+        const minEmpty = (minRaw === '' || minRaw === undefined || minRaw === null);
+        const secEmpty = (secRaw === '' || secRaw === undefined || secRaw === null);
+        const min = parseInt(minRaw) || 0;
+        const sec = parseInt(secRaw) || 0;
+
+        // Both fields must have a value entered (even if that value is 0)
+        if (minEmpty || secEmpty) {
+          if (minEmpty) {
+            const el = document.getElementById('time_estimate_minutes');
+            if (el) el.classList.add('estimation-block__input--error');
+          }
+          if (secEmpty) {
+            const el = document.getElementById('time_estimate_seconds');
+            if (el) el.classList.add('estimation-block__input--error');
+          }
+          return 'Please enter a value in both the minutes and seconds fields.';
+        }
+        // At least one must be > 0 (can't estimate 0m 0s)
+        if (min === 0 && sec === 0) {
+          const elMin = document.getElementById('time_estimate_minutes');
+          const elSec = document.getElementById('time_estimate_seconds');
+          if (elMin) elMin.classList.add('estimation-block__input--error');
+          if (elSec) elSec.classList.add('estimation-block__input--error');
+          return 'Your time estimate cannot be zero. Please enter how long you think the application took.';
+        }
+        if (sec < 0 || sec > 59) {
+          const el = document.getElementById('time_estimate_seconds');
+          if (el) el.classList.add('estimation-block__input--error');
+          return 'Seconds must be between 0 and 59.';
+        }
+        if (!formData.time_estimate_confidence) {
+          const section = document.getElementById('confidence-section');
+          if (section) section.classList.add('confidence-missing');
+          return 'Please select your confidence level.';
+        }
+        return null;
+      },
+      buttonText: 'Continue',
+      // Skip over the ineligible_end page — only eligible participants reach this page
+      skipIf: { field: 'is_eligible', value: 'yes', targetPageId: 'demographics' },
     },
 
     // ============================================================
