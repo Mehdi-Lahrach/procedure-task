@@ -185,7 +185,7 @@ const GREENZONE_PROCEDURE = {
   version: '1.0',
 
   // Prolific completion URL — set this before deploying
-  prolificCompletionUrl: 'https://app.prolific.com/submissions/complete?cc=XXXXXXX',
+  prolificCompletionUrl: 'https://app.prolific.com/submissions/complete?cc=C8K37UUH',
 
   // Stepper: only show these sections in the progress stepper
   stepperSections: ['Applicant details', 'Eligibility', 'Vehicle details', 'Review & Submit'],
