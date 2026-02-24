@@ -185,7 +185,7 @@ const GREENZONE_PROCEDURE = {
   version: '1.0',
 
   // Prolific completion URL — set this before deploying
-  prolificCompletionUrl: 'https://app.prolific.com/submissions/complete?cc=C8K37UUH',
+  prolificCompletionUrl: 'https://app.prolific.com/submissions/complete?cc=XXXXXXX',
 
   // Stepper: only show these sections in the progress stepper
   stepperSections: ['Applicant details', 'Eligibility', 'Vehicle details', 'Review & Submit'],
@@ -267,6 +267,11 @@ const GREENZONE_PROCEDURE = {
             <span style="background: #d4351c; color: white; font-weight: 700; font-size: 18px; min-width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">!</span>
             <strong style="color: #942514;">Do not use your own personal details at any point.</strong>
           </div>
+        </div>
+
+        <div style="background: #e8f5e9; border: 2px solid #2b8a3e; border-radius: 8px; padding: 16px 20px; margin-top: 24px;">
+          <h2 class="gov-heading-m" style="margin-top: 0; color: #2b8a3e;">💰 Quality bonus</h2>
+          <p class="gov-body" style="margin-bottom: 0;">Your submitted application will be reviewed for accuracy. If your application <strong>would be approved</strong> (i.e., it contains no serious errors that would cause rejection), you will receive a <strong>bonus payment of £0.50</strong> on top of the base reward. Take your time, consult the documents carefully, and ensure the information you enter is correct.</p>
         </div>
       `,
       buttonText: 'Continue',

@@ -76,6 +76,10 @@ class SludgeTracker {
           this.sessionId = resumeData.session_id;
           this.condition = resumeData.condition || null;
           this.sessionStartTime = Date.now();
+          // Restore tracker state (pageTimings, docInteractions, errors) if available
+          if (resumeData.trackerState) {
+            this._restoreTrackerState(resumeData.trackerState);
+          }
           this._setCookie('sludge_session_id', this.sessionId, 7);
           this._startFlushing();
           return {
@@ -127,6 +131,29 @@ class SludgeTracker {
   // PROGRESS PERSISTENCE
   // ============================================================
 
+  _getTrackerState() {
+    return {
+      pageTimings: this.pageTimings,
+      docInteractions: this.docInteractions,
+      errorCountsByPage: this.errorCountsByPage,
+      errorCountsByField: this.errorCountsByField,
+      totalErrors: this.totalErrors,
+      sessionStartTime: this.sessionStartTime,
+    };
+  }
+
+  _restoreTrackerState(state) {
+    if (!state) return;
+    this.pageTimings = state.pageTimings || [];
+    this.docInteractions = state.docInteractions || [];
+    this.errorCountsByPage = state.errorCountsByPage || {};
+    this.errorCountsByField = state.errorCountsByField || {};
+    this.totalErrors = state.totalErrors || 0;
+    if (state.sessionStartTime) {
+      this.sessionStartTime = state.sessionStartTime;
+    }
+  }
+
   async saveProgress(currentPageIndex, formData, currentPageId) {
     if (!this.sessionId) return;
     try {
@@ -138,6 +165,7 @@ class SludgeTracker {
           currentPageIndex,
           currentPageId: currentPageId || null,
           formData,
+          trackerState: this._getTrackerState(),
         }),
       });
     } catch (e) {

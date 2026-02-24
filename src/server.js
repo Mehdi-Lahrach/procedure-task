@@ -41,41 +41,25 @@ function loadSessionIndex() {
 // Two conditions: 'self' (estimate own time) vs 'average' (estimate average participant time)
 const ESTIMATION_CONDITIONS = ['self', 'average'];
 const ESTIMATION_BLOCK_SIZE = 4; // 2 self + 2 average per block
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes — incomplete sessions older than this are ignored for balance
 
 function blockRandomize(existingSessions) {
-  // Only count non-forced assignments
-  const assigned = existingSessions
-    .filter(s => !s.condition_forced && s.condition_code && ESTIMATION_CONDITIONS.includes(s.condition_code))
-    .map(s => s.condition_code);
+  const now = Date.now();
+  // Only count sessions that "hold" a condition slot:
+  // 1. Completed or submitted (they used the slot)
+  // 2. Still active (started within timeout window — might still complete)
+  // Timed-out incomplete sessions are ignored, releasing their condition slot for rebalancing.
+  const relevant = existingSessions.filter(s => {
+    if (!s.condition_code || !ESTIMATION_CONDITIONS.includes(s.condition_code)) return false;
+    if (s.condition_forced) return false;
+    if (s.is_complete || s.completion_status === 'submitted') return true;
+    // Still active? Check if started within timeout window
+    const startedAt = s.started_at ? new Date(s.started_at).getTime() : 0;
+    return (now - startedAt) < SESSION_TIMEOUT_MS;
+  });
+  const assigned = relevant.map(s => s.condition_code);
 
-  const total = assigned.length;
-  const posInBlock = total % ESTIMATION_BLOCK_SIZE;
-
-  if (posInBlock === 0) {
-    // New block: generate permuted block (Fisher-Yates shuffle)
-    const block = [];
-    for (const c of ESTIMATION_CONDITIONS) {
-      for (let i = 0; i < ESTIMATION_BLOCK_SIZE / ESTIMATION_CONDITIONS.length; i++) block.push(c);
-    }
-    for (let i = block.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [block[i], block[j]] = [block[j], block[i]];
-    }
-    blockRandomize._currentBlock = block;
-    return block[0];
-  }
-
-  // Mid-block: use stored block with consistency check
-  if (blockRandomize._currentBlock && blockRandomize._currentBlock.length === ESTIMATION_BLOCK_SIZE) {
-    const expected = blockRandomize._currentBlock.slice(0, posInBlock);
-    const actual = assigned.slice(-posInBlock);
-    const consistent = expected.every((c, i) => c === actual[i]);
-    if (consistent) {
-      return blockRandomize._currentBlock[posInBlock];
-    }
-  }
-
-  // Fallback: balanced assignment (server restart mid-block)
+  // Use simple balanced assignment (self-correcting after dropouts)
   const selfCount = assigned.filter(c => c === 'self').length;
   const avgCount = assigned.filter(c => c === 'average').length;
   if (selfCount < avgCount) return 'self';
@@ -134,7 +118,7 @@ app.post('/api/session/consent', (req, res) => {
 // --- Session Progress (save/resume) ---
 app.post('/api/session/progress', (req, res) => {
   try {
-    const { session_id, currentPageIndex, currentPageId, formData } = req.body;
+    const { session_id, currentPageIndex, currentPageId, formData, trackerState } = req.body;
     if (!session_id) return res.status(400).json({ success: false, error: 'Missing session_id' });
     const update = {
       session_id,
@@ -142,12 +126,14 @@ app.post('/api/session/progress', (req, res) => {
       currentPageIndex: currentPageIndex != null ? currentPageIndex : 0,
       currentPageId: currentPageId || null,
       formData: formData || {},
+      trackerState: trackerState || null,
     };
     appendJsonl('sessions_updates.jsonl', update);
     if (sessionIndex[session_id]) {
       sessionIndex[session_id].currentPageIndex = update.currentPageIndex;
       sessionIndex[session_id].currentPageId = update.currentPageId;
       sessionIndex[session_id].formData = update.formData;
+      if (trackerState) sessionIndex[session_id].trackerState = trackerState;
     }
     res.json({ success: true });
   } catch (err) {
@@ -183,6 +169,7 @@ app.get('/api/session/resume', (req, res) => {
       condition: session.condition_code || 'self',
       currentPageIndex: session.currentPageIndex || 0,
       formData: session.formData || {},
+      trackerState: session.trackerState || null,
       is_complete: !!session.is_complete,
     });
   } catch (err) {
@@ -510,7 +497,9 @@ app.get('/api/export/csv', checkKey, (req, res) => {
       baseHeaders.forEach(h => { row[h] = s[h] != null ? s[h] : ''; });
 
       const timingMap = {};
-      if (s.pageTimings) s.pageTimings.forEach(pt => { timingMap[pt.pageId] = pt.durationMs; });
+      if (s.pageTimings) s.pageTimings.forEach(pt => {
+        timingMap[pt.pageId] = (timingMap[pt.pageId] || 0) + (pt.durationMs || 0);
+      });
       Array.from(allPageIds).sort().forEach(pid => {
         row[`time_${pid}_ms`] = timingMap[pid] != null ? timingMap[pid] : '';
       });
@@ -738,8 +727,16 @@ app.get('/api/stats', checkKey, (req, res) => {
     const all = getMergedSessions();
     const fmt = ms => { if (!ms) return '0s'; const s = Math.round(ms/1000); const m = Math.floor(s/60); return m > 0 ? `${m}m ${s%60}s` : `${s}s`; };
 
+    // Parse exclusion list (comma-separated Prolific PIDs)
+    const excludeParam = (req.query.exclude || '').trim();
+    const excludePids = excludeParam ? excludeParam.split(',').map(p => p.trim()).filter(Boolean) : [];
+
     // Classify sessions using the 5-category system
-    const classified = all.map(s => ({ ...s, completion_status: getCompletionStatus(s), last_page: getLastPage(s) }));
+    const classifiedAll = all.map(s => ({ ...s, completion_status: getCompletionStatus(s), last_page: getLastPage(s) }));
+    // Apply exclusions — excluded participants are removed from all calculations
+    const classified = classifiedAll.filter(s => !excludePids.includes(s.prolific_pid));
+    const excludedCount = classifiedAll.length - classified.length;
+
     const complete = classified.filter(s => s.completion_status === 'complete');
     const submitted = classified.filter(s => s.completion_status === 'submitted');
     const ineligible = classified.filter(s => s.completion_status === 'ineligible');
@@ -747,7 +744,10 @@ app.get('/api/stats', checkKey, (req, res) => {
     const incomplete = classified.filter(s => s.completion_status === 'incomplete');
 
     // "Exploitable" = sessions with usable procedure data (complete + submitted, both did the full procedure)
-    const exploitable = [...complete, ...submitted];
+    // Flag sessions with missing timing data (e.g. page refresh caused tracker reset)
+    const allExploitable = [...complete, ...submitted];
+    const timingMissing = allExploitable.filter(s => !s.applicationDurationMs || s.applicationDurationMs === 0);
+    const exploitable = allExploitable.filter(s => s.applicationDurationMs && s.applicationDurationMs > 0);
 
     // Helper: compute median of a numeric array
     const medianOf = arr => {
@@ -929,6 +929,23 @@ app.get('/api/stats', checkKey, (req, res) => {
       .map(([doc, count]) => ({ doc, count, rate: exploitable.length > 0 ? Math.round(count / exploitable.length * 100) : 0, isCorrect: doc === 'electricity_bill' }))
       .sort((a, b) => b.count - a.count);
 
+    // Attention check analysis — expected answer: "I pay attention" (case-insensitive, trimmed)
+    const attentionResults = allExploitable.map(s => {
+      const responses = {};
+      if (s.formResponses) Object.values(s.formResponses).forEach(pd => Object.assign(responses, pd));
+      const answer = (responses.attention_response || '').trim();
+      const passed = answer.toLowerCase() === 'i pay attention';
+      return {
+        session_id: s.session_id,
+        prolific_pid: s.prolific_pid || '—',
+        answer,
+        passed,
+        condition: s.condition_code || '—',
+        completion_status: getCompletionStatus(s),
+      };
+    });
+    const attentionFailed = attentionResults.filter(r => !r.passed);
+
     // Phase-level timing (aggregate page times into sections)
     const PHASE_MAP = {
       'applicant_details': 'Applicant Details',
@@ -981,22 +998,27 @@ app.get('/api/stats', checkKey, (req, res) => {
       const selfData = withEstimates.filter(d => d.condition === 'self');
       const avgData = withEstimates.filter(d => d.condition === 'average');
 
-      // Actual procedure times from all exploitable sessions (for comparison baseline)
+      // Actual procedure times — overall (baseline for "average" condition) and per-condition
       const actualSecAll = appDurations.map(ms => Math.round(ms / 1000));
-      const actualMeanSec = actualSecAll.length > 0 ? Math.round(actualSecAll.reduce((a, b) => a + b, 0) / actualSecAll.length) : 0;
-      const actualMedianSec = Math.round(medianOf(actualSecAll));
+      const actualMeanSecAll = actualSecAll.length > 0 ? Math.round(actualSecAll.reduce((a, b) => a + b, 0) / actualSecAll.length) : 0;
+      const actualMedianSecAll = Math.round(medianOf(actualSecAll));
 
-      const conditionStats = (data, label) => {
+      // Self-condition participants' actual times (baseline for "self" condition)
+      const selfActualSec = selfData.map(d => d.actualSec).filter(s => s > 0);
+      const selfActualMeanSec = selfActualSec.length > 0 ? Math.round(selfActualSec.reduce((a, b) => a + b, 0) / selfActualSec.length) : 0;
+      const selfActualMedianSec = Math.round(medianOf(selfActualSec));
+
+      const conditionStats = (data, label, baselineMean, baselineMedian) => {
         if (data.length === 0) return { label, n: 0 };
         const estimates = data.map(d => d.estimateSec);
         const mean = Math.round(estimates.reduce((a, b) => a + b, 0) / estimates.length);
         const median = Math.round(medianOf(estimates));
         const confidences = data.map(d => d.confidence).filter(c => c != null);
         const meanConf = confidences.length > 0 ? (confidences.reduce((a, b) => a + b, 0) / confidences.length).toFixed(1) : '—';
-        // Estimation ratio: estimate / actual (>1 = overestimate, <1 = underestimate)
-        const meanRatio = actualMeanSec > 0 ? (mean / actualMeanSec).toFixed(2) : '—';
-        const medianRatio = actualMedianSec > 0 ? (median / actualMedianSec).toFixed(2) : '—';
-        return { label, n: data.length, meanEstimateSec: mean, medianEstimateSec: median, meanConfidence: meanConf, meanRatio, medianRatio };
+        // Estimation ratio: estimate / actual baseline (>1 = overestimate, <1 = underestimate)
+        const meanRatio = baselineMean > 0 ? (mean / baselineMean).toFixed(2) : '—';
+        const medianRatio = baselineMedian > 0 ? (median / baselineMedian).toFixed(2) : '—';
+        return { label, n: data.length, meanEstimateSec: mean, medianEstimateSec: median, meanConfidence: meanConf, meanRatio, medianRatio, actualMeanSec: baselineMean, actualMedianSec: baselineMedian };
       };
 
       // Self-condition individual accuracy: each person's estimate vs their own actual time
@@ -1056,13 +1078,14 @@ app.get('/api/stats', checkKey, (req, res) => {
 
       // Between-condition comparison: which condition is closer to actual time?
       const conditionComparison = (() => {
-        const selfStats = conditionStats(selfData, 'Self');
-        const avgStats = conditionStats(avgData, 'Average');
+        const selfStats = conditionStats(selfData, 'Self', selfActualMeanSec, selfActualMedianSec);
+        const avgStats = conditionStats(avgData, 'Average', actualMeanSecAll, actualMedianSecAll);
         if (selfStats.n === 0 && avgStats.n === 0) return null;
-        const selfErrorVsActualMean = selfStats.n > 0 && actualMeanSec > 0
-          ? Math.round(Math.abs(selfStats.meanEstimateSec - actualMeanSec)) : null;
-        const avgErrorVsActualMean = avgStats.n > 0 && actualMeanSec > 0
-          ? Math.round(Math.abs(avgStats.meanEstimateSec - actualMeanSec)) : null;
+        // For between-condition comparison, both are compared against the overall mean
+        const selfErrorVsActualMean = selfStats.n > 0 && actualMeanSecAll > 0
+          ? Math.round(Math.abs(selfStats.meanEstimateSec - actualMeanSecAll)) : null;
+        const avgErrorVsActualMean = avgStats.n > 0 && actualMeanSecAll > 0
+          ? Math.round(Math.abs(avgStats.meanEstimateSec - actualMeanSecAll)) : null;
         let closerCondition = null;
         if (selfErrorVsActualMean != null && avgErrorVsActualMean != null) {
           closerCondition = selfErrorVsActualMean < avgErrorVsActualMean ? 'Self' :
@@ -1077,9 +1100,9 @@ app.get('/api/stats', checkKey, (req, res) => {
 
       return {
         conditionBalance: { self: allSelfCount, average: allAvgCount },
-        actualMeanSec, actualMedianSec,
-        self: conditionStats(selfData, 'Self'),
-        average: conditionStats(avgData, 'Average'),
+        actualMeanSec: actualMeanSecAll, actualMedianSec: actualMedianSecAll,
+        self: conditionStats(selfData, 'Self', selfActualMeanSec, selfActualMedianSec),
+        average: conditionStats(avgData, 'Average', actualMeanSecAll, actualMedianSecAll),
         selfAccuracy,
         confidenceDistribution,
         confidenceAccuracy,
@@ -1120,13 +1143,16 @@ app.get('/api/stats', checkKey, (req, res) => {
       }));
 
     res.json({
-      total_sessions: all.length,
+      total_sessions: classified.length,
+      excluded_count: excludedCount,
+      excluded_pids: excludePids,
       complete_sessions: complete.length,
       submitted_sessions: submitted.length,
       ineligible_sessions: ineligible.length,
       dropped_sessions: dropped.length,
       incomplete_sessions: incomplete.length,
       exploitable_sessions: exploitable.length,
+      timing_missing_sessions: timingMissing.length,
       consented_sessions: all.filter(s => s.consent_given).length,
       avg_total_duration_formatted: fmt(avgDur),
       avg_task_duration_formatted: fmt(avgAppDur),
@@ -1157,6 +1183,10 @@ app.get('/api/stats', checkKey, (req, res) => {
       residence_breakdown: residenceBreakdown,
       // Phase timing
       phase_stats: phaseStats,
+      // Attention check
+      attention_total: attentionResults.length,
+      attention_passed: attentionResults.filter(r => r.passed).length,
+      attention_failed: attentionFailed,
       // Time estimation
       estimation_stats: estimationStats,
     });
@@ -1182,68 +1212,6 @@ app.post('/api/delete-all-data', checkKey, (req, res) => {
     Object.keys(sessionIndex).forEach(k => delete sessionIndex[k]);
     console.log(`  [DELETE] All data erased (${deleted} files) by researcher`);
     res.json({ success: true, filesDeleted: deleted });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// --- List all sessions (prolific_pid + completion status) ---
-app.get('/api/list-sessions', checkKey, (req, res) => {
-  const sessions = readJsonl('sessions.jsonl');
-  res.json(sessions.map(s => ({
-    session_id: s.session_id,
-    prolific_pid: s.prolific_pid,
-    completion_status: s.completion_status,
-    completed_at: s.completed_at || null,
-  })));
-});
-
-// --- Bulk import sessions (restore from CSV backup) ---
-app.post('/api/import-sessions', checkKey, (req, res) => {
-  try {
-    const { sessions } = req.body;
-    if (!Array.isArray(sessions) || sessions.length === 0)
-      return res.status(400).json({ error: 'sessions array required' });
-    const filepath = path.join(DATA_DIR, 'sessions.jsonl');
-    const lines = sessions.map(s => JSON.stringify({ ...s, _written_at: new Date().toISOString() }));
-    fs.writeFileSync(filepath, lines.join('\n') + '\n', 'utf8');
-    // Rebuild in-memory index
-    Object.keys(sessionIndex).forEach(k => delete sessionIndex[k]);
-    sessions.forEach(s => { sessionIndex[s.session_id] = s; });
-    console.log(`  [IMPORT] ${sessions.length} sessions restored`);
-    res.json({ success: true, imported: sessions.length });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// --- Remove specific participant by prolific_pid ---
-app.get('/api/remove-participant', checkKey, (req, res) => {
-  try {
-    const { pid } = req.query;
-    if (!pid) return res.status(400).json({ error: 'pid query param required' });
-
-    const sessions = readJsonl('sessions.jsonl');
-    const toRemove = sessions.filter(s => s.prolific_pid === pid);
-    if (toRemove.length === 0) return res.status(404).json({ error: 'No sessions found for that prolific_pid' });
-
-    const sessionIds = new Set(toRemove.map(s => s.session_id));
-
-    // Filter sessions.jsonl
-    const filtered = sessions.filter(s => s.prolific_pid !== pid);
-    const sessionsPath = path.join(DATA_DIR, 'sessions.jsonl');
-    fs.writeFileSync(sessionsPath, filtered.map(s => JSON.stringify(s)).join('\n') + (filtered.length ? '\n' : ''), 'utf8');
-
-    // Filter all event files by session_id
-    ['navigation_events.jsonl', 'misc_events.jsonl', 'sessions_updates.jsonl'].forEach(filename => {
-      const filepath = path.join(DATA_DIR, filename);
-      if (!fs.existsSync(filepath)) return;
-      const records = readJsonl(filename);
-      const filteredRecords = records.filter(r => !sessionIds.has(r.session_id));
-      fs.writeFileSync(filepath, filteredRecords.map(r => JSON.stringify(r)).join('\n') + (filteredRecords.length ? '\n' : ''), 'utf8');
-    });
-
-    // Remove from in-memory index
-    sessionIds.forEach(sid => delete sessionIndex[sid]);
-
-    console.log(`  [REMOVE] Participant ${pid} removed (${toRemove.length} session(s))`);
-    res.json({ success: true, removed_sessions: toRemove.length, session_ids: [...sessionIds] });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1288,6 +1256,14 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 </style></head>
 <body>
 <h1>Sludge Experiment Dashboard</h1>
+
+<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
+  <label style="font-size:14px;font-weight:600;color:#856404;">Exclude participants (Prolific PIDs, comma-separated):</label><br>
+  <input id="exclude-input" type="text" placeholder="e.g. 5cf101ea..., 65b901e6..." style="width:70%;padding:6px 10px;margin-top:6px;border:1px solid #ccc;border-radius:4px;font-size:13px;font-family:monospace">
+  <button id="exclude-btn" style="padding:6px 16px;margin-left:8px;background:#1d70b8;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px">Apply</button>
+  <button id="exclude-clear" style="padding:6px 12px;margin-left:4px;background:#f3f2f1;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:13px">Clear</button>
+  <span id="exclude-status" style="margin-left:12px;font-size:12px;color:#505a5f"></span>
+</div>
 
 <h2>Participation</h2>
 <div id="participation" class="stats-grid"></div>
@@ -1342,7 +1318,8 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 <div id="estimation-balance" class="stats-grid"></div>
 
 <h3>Analysis 1: Group-Level Estimates vs Actual Procedure Time</h3>
-<p class="help">Compares the <strong>average estimate</strong> in each condition to the <strong>actual average procedure time</strong> across all exploitable sessions. The <em>Ratio</em> column shows estimate ÷ actual: a ratio of 1.00 means perfect calibration, &gt;1 means overestimation, &lt;1 means underestimation. This answers: <em>Do people think the procedure takes longer or shorter than it actually does?</em></p>
+<p class="help">Compares the <strong>average estimate</strong> in each condition to the <strong>actual average procedure time</strong>. The <em>Ratio</em> column shows estimate &divide; actual (&gt;1 = overestimate, &lt;1 = underestimate).</p>
+<p class="help"><strong>Important:</strong> Each condition uses a different baseline for "Actual". <em>Self</em> compares against the actual mean of self-condition participants only (since they estimated their own time). <em>Average</em> compares against the actual mean of all exploitable sessions (since they estimated the average participant&rsquo;s time).</p>
 <table id="estimation-table">
   <thead><tr><th>Condition</th><th>N</th><th>Mean Estimate</th><th>Median Estimate</th><th>Actual Mean</th><th>Actual Median</th><th>Ratio (Mean)</th><th>Avg Confidence</th></tr></thead>
   <tbody></tbody>
@@ -1380,6 +1357,16 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
   <thead><tr><th>Last Page Reached</th><th>Count</th><th></th></tr></thead>
   <tbody></tbody>
 </table>
+
+<h2>Attention Check</h2>
+<p class="help">Participants were asked to write "I pay attention" in a text box. Failures may indicate careless responding.</p>
+<p><strong id="attention-summary"></strong></p>
+<div id="attention-failed-section" style="display:none;">
+<table id="attention-table">
+  <thead><tr><th>Prolific PID</th><th>Condition</th><th>Answer Given</th><th>Status</th></tr></thead>
+  <tbody></tbody>
+</table>
+</div>
 
 <div class="export">
 <h2 style="border:none;margin-top:0">Export Data</h2>
@@ -1430,6 +1417,35 @@ full = df[df.completion_status == "complete"]</pre>
 const K = '${EXPORT_KEY}';
 const fmt = ms => { if (!ms) return '0s'; const s = Math.round(ms/1000); const m = Math.floor(s/60); return m > 0 ? m+'m '+s%60+'s' : s+'s'; };
 
+// Exclusion management
+const urlParams = new URLSearchParams(window.location.search);
+const excludeInput = document.getElementById('exclude-input');
+const excludeStatus = document.getElementById('exclude-status');
+if (urlParams.get('exclude')) {
+  excludeInput.value = urlParams.get('exclude');
+}
+function getExcludeParam() { return excludeInput.value.trim(); }
+function loadDashboard() {
+  const exclude = getExcludeParam();
+  const excludeQ = exclude ? '&exclude=' + encodeURIComponent(exclude) : '';
+  fetchStats(excludeQ);
+  if (exclude) {
+    const url = new URL(window.location);
+    url.searchParams.set('exclude', exclude);
+    window.history.replaceState({}, '', url);
+    excludeStatus.textContent = 'Excluding ' + exclude.split(',').filter(Boolean).length + ' participant(s)';
+    excludeStatus.style.color = '#d4351c';
+  } else {
+    const url = new URL(window.location);
+    url.searchParams.delete('exclude');
+    window.history.replaceState({}, '', url);
+    excludeStatus.textContent = '';
+  }
+}
+document.getElementById('exclude-btn').onclick = loadDashboard;
+document.getElementById('exclude-clear').onclick = function() { excludeInput.value = ''; loadDashboard(); };
+excludeInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') loadDashboard(); });
+
 const SECTIONS = {
   'Consent': 'Consent',
   'Instructions': 'Instructions', 'Confirm instructions': 'Instructions',
@@ -1444,7 +1460,8 @@ const SECTIONS = {
   'Feedback': 'Post-Task', 'Debrief': 'Post-Task', 'Completion': 'Post-Task',
 };
 
-fetch('/api/stats?key='+K).then(r=>r.json()).then(s=>{
+function fetchStats(excludeQ) {
+fetch('/api/stats?key='+K+(excludeQ||'')).then(r=>r.json()).then(s=>{
   const total = s.total_sessions || 0;
   const comp = s.complete_sessions || 0;
   const subm = s.submitted_sessions || 0;
@@ -1473,7 +1490,8 @@ fetch('/api/stats?key='+K).then(r=>r.json()).then(s=>{
     '<dt><span class="dot dot--amber"></span>Dropped ('+drop+')</dt><dd> — consented and started the procedure but did not submit the application.</dd>'+
     '<dt><span class="dot dot--red"></span>Incomplete ('+incomp+')</dt><dd> — opened the link but did not consent or barely started.</dd>'+
     '</dl>'+
-    '<p style="margin:8px 0 0;font-size:12px;color:#505a5f"><strong>Exploitable data:</strong> '+exploit+' sessions (Complete + Submitted). Timing and quality averages are computed from these sessions.</p>';
+    '<p style="margin:8px 0 0;font-size:12px;color:#505a5f"><strong>Exploitable data:</strong> '+exploit+' sessions (Complete + Submitted). Timing and quality averages are computed from these sessions.</p>'+
+    (s.timing_missing_sessions > 0 ? '<p style="margin:4px 0 0;font-size:12px;color:#d4351c"><strong>&#9888; Timing data missing:</strong> '+s.timing_missing_sessions+' session(s) completed the task but have no timing data (likely due to a page refresh that reset the tracker). These are excluded from timing averages but their form responses are still valid.</p>' : '');
 
   // Timing legend
   document.getElementById('timing-legend').innerHTML =
@@ -1632,7 +1650,7 @@ fetch('/api/stats?key='+K).then(r=>r.json()).then(s=>{
   const ratioColor = r => { if (r === '—') return ''; const v = parseFloat(r); if (v > 1.1) return ' style="color:#b58105;font-weight:700"'; if (v < 0.9) return ' style="color:#1d70b8;font-weight:700"'; return ' style="color:#00703c;font-weight:700"'; };
   const estRows = [est.self, est.average].filter(c => c && c.n > 0);
   document.querySelector('#estimation-table tbody').innerHTML = estRows.map(c =>
-    '<tr><td><strong>'+c.label+'</strong></td><td class="num">'+c.n+'</td><td class="num">'+fmtSec(c.meanEstimateSec)+'</td><td class="num">'+fmtSec(c.medianEstimateSec)+'</td><td class="num">'+fmtSec(est.actualMeanSec)+'</td><td class="num">'+fmtSec(est.actualMedianSec)+'</td><td class="num"'+ratioColor(c.meanRatio)+'>'+c.meanRatio+'</td><td class="num">'+c.meanConfidence+' / 5</td></tr>'
+    '<tr><td><strong>'+c.label+'</strong></td><td class="num">'+c.n+'</td><td class="num">'+fmtSec(c.meanEstimateSec)+'</td><td class="num">'+fmtSec(c.medianEstimateSec)+'</td><td class="num">'+fmtSec(c.actualMeanSec)+'</td><td class="num">'+fmtSec(c.actualMedianSec)+'</td><td class="num"'+ratioColor(c.meanRatio)+'>'+c.meanRatio+'</td><td class="num">'+c.meanConfidence+' / 5</td></tr>'
   ).join('') || '<tr><td colspan="8">No estimation data yet</td></tr>';
 
   // Self-condition individual accuracy
@@ -1717,6 +1735,20 @@ fetch('/api/stats?key='+K).then(r=>r.json()).then(s=>{
       '<p class="help">Not enough self-condition data yet (minimum 3 participants needed). This analysis will show whether more confident participants estimate more accurately.</p>';
   }
 
+  // Attention check
+  const attPassed = s.attention_passed || 0;
+  const attTotal = s.attention_total || 0;
+  const attFailed = s.attention_failed || [];
+  document.getElementById('attention-summary').textContent =
+    attPassed + ' / ' + attTotal + ' passed' + (attFailed.length > 0 ? ' — ' + attFailed.length + ' failed:' : '');
+  if (attFailed.length > 0) {
+    document.getElementById('attention-failed-section').style.display = '';
+    document.querySelector('#attention-table tbody').innerHTML = attFailed.map(a =>
+      '<tr><td><code>' + a.prolific_pid + '</code></td><td>' + a.condition + '</td><td>' +
+      (a.answer || '<em>empty</em>') + '</td><td>' + a.completion_status + '</td></tr>'
+    ).join('');
+  }
+
   // Drop-off table
   const dropOffs = s.drop_off || [];
   const maxDrop = Math.max(...dropOffs.map(d=>d.count), 1);
@@ -1725,6 +1757,10 @@ fetch('/api/stats?key='+K).then(r=>r.json()).then(s=>{
     return '<tr><td>'+d.pageName+'</td><td class="num">'+d.count+'</td><td><span class="bar bar--red" style="width:'+pct+'%">&nbsp;</span></td></tr>';
   }).join('') || '<tr><td colspan="3">No drop-offs recorded</td></tr>';
 });
+} // end fetchStats
+
+// Initial load
+loadDashboard();
 
 // Delete data flow
 document.getElementById('delete-btn-1').onclick = function() {

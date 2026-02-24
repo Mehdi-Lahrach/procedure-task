@@ -114,17 +114,23 @@ A fictional but realistic 19-page government application for a "Green Zone Vehic
 
 - **Session management**: Create, consent, progress (save), resume, complete
 - **Session persistence**: In-memory `sessionIndex` cache with `sessions.jsonl` (creation) + `sessions_updates.jsonl` (updates). `getMergedSessions()` merges base + updates for a unified view.
+- **Tracker state persistence**: `pageTimings`, `docInteractions`, error counts, and `sessionStartTime` are saved server-side with each progress update and restored on session resume. Fixes `applicationDurationMs=0` after page refresh.
 - **Duplicate prevention**: Resume endpoint detects already-completed sessions and returns `already_complete` flag
+- **Condition rebalancing**: Block randomizer ignores timed-out sessions (>30 min inactive). Dropout participants' condition slots are released so the next participant naturally restores balance between self/average conditions.
 - **Completion status**: Each session is classified as `complete` (finished everything including post-task + Prolific redirect), `submitted` (submitted the application but dropped before finishing post-task — procedure data still exploitable), `ineligible` (selected "not eligible"), `dropped` (consented but did not submit), or `incomplete` (did not consent/barely started). Drop-off page tracked for partial sessions.
 - **Event ingestion**: Batch endpoint accepting all event types → stored as JSONL files
 - **Application quality scoring**: Each submitted application is automatically checked against an answer key derived from the fictional documents (name, DOB, national ID, eligibility decision, supporting documents, vehicle registration, owner type, category, fuel type, environmental class). Distinguishes substantive errors (wrong information → rejection) from formatting errors caught during the procedure.
 - **Per-participant aggregation**: Stats and dashboard aggregate page timings and errors per-session first (one count per participant per page, not per visit)
+- **CSV timing accumulation**: Per-page timing columns sum all visits to each page (including back-button revisits) rather than overwriting with the last visit. `applicationDurationMs` and CSV columns are now consistent.
 - **Data export**:
   - `/api/export/csv` — **Flat CSV, one row per session** with all form data, per-page timings, document stats, error counts
   - `/api/export/all/json` — Full JSON dump of all tables
   - `/api/export/{table}` — Individual table export (JSON or CSV with `&format=csv`)
 - **Ineligible session handling**: Sessions where the participant selected "not eligible" are flagged (`ineligible_skipped=yes` in CSV) and excluded from main timing averages
-- **Dashboard**: `/dashboard` — Live stats with color-coded status cards (including ineligible count), application quality scoring section (rejection rate + per-field error table), page-by-page timing and validation error breakdown, document interaction rates, drop-off analysis
+- **Attention check report**: Dashboard section showing pass/fail count with a table of failed Prolific PIDs and their answers. Compares `attention_response` against "i pay attention" (case-insensitive, trimmed).
+- **Participant exclusion**: Dashboard accepts comma-separated Prolific PIDs to exclude from all calculations. Persists in URL for bookmarking/sharing.
+- **Quality bonus**: Instructions page shows a £0.50 bonus notice for submitting an error-free application (would be approved, no rejection errors).
+- **Dashboard**: `/dashboard` — Live stats with color-coded status cards (including ineligible count), application quality scoring section (rejection rate + per-field error table), page-by-page timing and validation error breakdown, document interaction rates, attention check report, drop-off analysis
 - **Authentication**: All export/stats endpoints require `?key=research2025` (configurable via `EXPORT_KEY` env var)
 
 ---
