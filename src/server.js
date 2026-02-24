@@ -189,6 +189,8 @@ app.post('/api/session/complete', (req, res) => {
       is_complete: true,
       totalDurationMs: req.body.totalDurationMs || 0,
       applicationDurationMs: req.body.applicationDurationMs || 0,
+      activeApplicationDurationMs: req.body.activeApplicationDurationMs || 0,
+      totalHiddenMs: req.body.totalHiddenMs || 0,
       totalDocTimeMs: req.body.totalDocTimeMs || 0,
       totalDocOpens: req.body.totalDocOpens || 0,
       totalErrors: req.body.totalErrors || 0,
@@ -219,6 +221,8 @@ app.post('/api/session/snapshot', (req, res) => {
       snapshot_at: new Date().toISOString(),
       totalDurationMs: req.body.totalDurationMs || 0,
       applicationDurationMs: req.body.applicationDurationMs || 0,
+      activeApplicationDurationMs: req.body.activeApplicationDurationMs || 0,
+      totalHiddenMs: req.body.totalHiddenMs || 0,
       totalDocTimeMs: req.body.totalDocTimeMs || 0,
       totalDocOpens: req.body.totalDocOpens || 0,
       totalErrors: req.body.totalErrors || 0,
@@ -473,11 +477,11 @@ app.get('/api/export/csv', checkKey, (req, res) => {
     const baseHeaders = [
       'session_id', 'prolific_pid', 'study_id', 'condition_code', 'condition_forced', 'procedure_version',
       'started_at', 'completed_at', 'completion_status', 'last_page', 'consent_given',
-      'totalDurationMs', 'applicationDurationMs', 'totalDocTimeMs', 'totalDocOpens', 'totalErrors',
+      'totalDurationMs', 'applicationDurationMs', 'activeApplicationDurationMs', 'totalHiddenMs', 'totalDocTimeMs', 'totalDocOpens', 'totalErrors',
       'screen_width', 'screen_height', 'timezone', 'language', 'platform',
     ];
 
-    const pageTimingHeaders = Array.from(allPageIds).sort().map(pid => `time_${pid}_ms`);
+    const pageTimingHeaders = Array.from(allPageIds).sort().flatMap(pid => [`time_${pid}_ms`, `active_time_${pid}_ms`]);
     const docHeaders = [];
     Array.from(allDocIds).sort().forEach(did => {
       docHeaders.push(`doc_${did}_opens`, `doc_${did}_totalMs`);
@@ -497,11 +501,14 @@ app.get('/api/export/csv', checkKey, (req, res) => {
       baseHeaders.forEach(h => { row[h] = s[h] != null ? s[h] : ''; });
 
       const timingMap = {};
+      const activeTimingMap = {};
       if (s.pageTimings) s.pageTimings.forEach(pt => {
         timingMap[pt.pageId] = (timingMap[pt.pageId] || 0) + (pt.durationMs || 0);
+        activeTimingMap[pt.pageId] = (activeTimingMap[pt.pageId] || 0) + (pt.activeTimeMs != null ? pt.activeTimeMs : (pt.durationMs || 0));
       });
       Array.from(allPageIds).sort().forEach(pid => {
         row[`time_${pid}_ms`] = timingMap[pid] != null ? timingMap[pid] : '';
+        row[`active_time_${pid}_ms`] = activeTimingMap[pid] != null ? activeTimingMap[pid] : '';
       });
 
       const docMap = {};
@@ -760,6 +767,8 @@ app.get('/api/stats', checkKey, (req, res) => {
     // Collect raw timing arrays for medians and distribution
     const totalDurations = exploitable.map(s => s.totalDurationMs || s.total_duration_ms || 0).filter(v => v > 0);
     const appDurations = exploitable.map(s => s.applicationDurationMs || 0).filter(v => v > 0);
+    const activeAppDurations = exploitable.map(s => s.activeApplicationDurationMs || s.applicationDurationMs || 0).filter(v => v > 0);
+    const hiddenTimes = exploitable.map(s => s.totalHiddenMs || 0);
     const docTimes = exploitable.map(s => s.totalDocTimeMs || 0).filter(v => v > 0);
     const docOpenCounts = exploitable.map(s => s.totalDocOpens || 0);
     const errorCounts = exploitable.map(s => s.totalErrors || s.total_errors || 0);
@@ -767,6 +776,8 @@ app.get('/api/stats', checkKey, (req, res) => {
     // Timing averages from exploitable sessions (everyone who completed the procedure)
     const avgDur = totalDurations.length ? totalDurations.reduce((a, b) => a + b, 0) / totalDurations.length : 0;
     const avgAppDur = appDurations.length ? appDurations.reduce((a, b) => a + b, 0) / appDurations.length : 0;
+    const avgActiveAppDur = activeAppDurations.length ? activeAppDurations.reduce((a, b) => a + b, 0) / activeAppDurations.length : 0;
+    const avgHiddenTime = hiddenTimes.length ? hiddenTimes.reduce((a, b) => a + b, 0) / hiddenTimes.length : 0;
     const avgErrors = errorCounts.length ? errorCounts.reduce((a, b) => a + b, 0) / errorCounts.length : 0;
     const avgDocTime = docTimes.length ? docTimes.reduce((a, b) => a + b, 0) / docTimes.length : 0;
     const avgDocOpens = docOpenCounts.length ? docOpenCounts.reduce((a, b) => a + b, 0) / docOpenCounts.length : 0;
@@ -774,9 +785,12 @@ app.get('/api/stats', checkKey, (req, res) => {
     // Medians
     const medDur = medianOf(totalDurations);
     const medAppDur = medianOf(appDurations);
+    const medActiveAppDur = medianOf(activeAppDurations);
     const medErrors = medianOf(errorCounts);
     const medDocTime = medianOf(docTimes);
     const medDocOpens = medianOf(docOpenCounts);
+    // Active time percentage
+    const activePercent = avgAppDur > 0 ? Math.round(avgActiveAppDur / avgAppDur * 100) : 100;
 
     // Distribution data: procedure time histogram (appDurations in seconds, binned)
     const appDurSec = appDurations.map(ms => Math.round(ms / 1000));
@@ -794,20 +808,24 @@ app.get('/api/stats', checkKey, (req, res) => {
 
     // Per-page stats (from exploitable sessions — everyone who completed the procedure)
     const pageStats = {};
-    PAGE_ORDER.forEach(pid => { pageStats[pid] = { totalTime: 0, nTime: 0, totalErrors: 0, nWithErrors: 0, nTotal: 0 }; });
+    PAGE_ORDER.forEach(pid => { pageStats[pid] = { totalTime: 0, totalActiveTime: 0, nTime: 0, totalErrors: 0, nWithErrors: 0, nTotal: 0 }; });
 
     exploitable.forEach(s => {
       // Aggregate all visits to the same page within this session first
       if (s.pageTimings) {
         const sessionPageTotals = {};
+        const sessionPageActiveTotals = {};
         s.pageTimings.forEach(pt => {
           if (!sessionPageTotals[pt.pageId]) sessionPageTotals[pt.pageId] = 0;
+          if (!sessionPageActiveTotals[pt.pageId]) sessionPageActiveTotals[pt.pageId] = 0;
           sessionPageTotals[pt.pageId] += pt.durationMs;
+          sessionPageActiveTotals[pt.pageId] += (pt.activeTimeMs != null ? pt.activeTimeMs : pt.durationMs);
         });
         // Now add per-session totals (count each participant once per page)
         Object.entries(sessionPageTotals).forEach(([pid, totalMs]) => {
-          if (!pageStats[pid]) pageStats[pid] = { totalTime: 0, nTime: 0, totalErrors: 0, nWithErrors: 0, nTotal: 0 };
+          if (!pageStats[pid]) pageStats[pid] = { totalTime: 0, totalActiveTime: 0, nTime: 0, totalErrors: 0, nWithErrors: 0, nTotal: 0 };
           pageStats[pid].totalTime += totalMs;
+          pageStats[pid].totalActiveTime += (sessionPageActiveTotals[pid] || 0);
           pageStats[pid].nTime++;
           pageStats[pid].nTotal++;
         });
@@ -831,6 +849,8 @@ app.get('/api/stats', checkKey, (req, res) => {
           pageName: pageName(pid),
           avgTimeMs: Math.round(d.totalTime / d.nTime),
           avgTimeFormatted: fmt(d.totalTime / d.nTime),
+          avgActiveTimeMs: Math.round(d.totalActiveTime / d.nTime),
+          avgActiveTimeFormatted: fmt(d.totalActiveTime / d.nTime),
           n: d.nTime,
           totalErrors: d.totalErrors,
           avgErrors: d.nTime > 0 ? (d.totalErrors / d.nTime).toFixed(1) : '0',
@@ -1156,6 +1176,9 @@ app.get('/api/stats', checkKey, (req, res) => {
       consented_sessions: all.filter(s => s.consent_given).length,
       avg_total_duration_formatted: fmt(avgDur),
       avg_task_duration_formatted: fmt(avgAppDur),
+      avg_active_task_duration_formatted: fmt(avgActiveAppDur),
+      avg_hidden_time_formatted: fmt(avgHiddenTime),
+      active_percent: activePercent,
       avg_errors: avgErrors.toFixed(1),
       avg_doc_time_formatted: fmt(avgDocTime),
       avg_doc_opens: avgDocOpens.toFixed(1),
@@ -1165,6 +1188,7 @@ app.get('/api/stats', checkKey, (req, res) => {
       // Medians
       median_total_duration_formatted: fmt(medDur),
       median_task_duration_formatted: fmt(medAppDur),
+      median_active_task_duration_formatted: fmt(medActiveAppDur),
       median_errors: medErrors,
       median_doc_time_formatted: fmt(medDocTime),
       median_doc_opens: medDocOpens,
@@ -1189,6 +1213,28 @@ app.get('/api/stats', checkKey, (req, res) => {
       attention_failed: attentionFailed,
       // Time estimation
       estimation_stats: estimationStats,
+      // Participant-level rows for interactive table (uses classifiedAll so excluded ones are still visible)
+      participants: classifiedAll.map(s => {
+        const score = scoreApplication(s);
+        const responses = {};
+        if (s.formResponses) Object.values(s.formResponses).forEach(pd => Object.assign(responses, pd));
+        const attAnswer = (responses.attention_response || '').trim();
+        const attPassed = attAnswer.toLowerCase() === 'i pay attention';
+        return {
+          prolific_pid: s.prolific_pid || '—',
+          session_id: s.session_id,
+          condition: s.condition_code || '—',
+          completion_status: s.completion_status,
+          app_duration_sec: s.applicationDurationMs ? Math.round(s.applicationDurationMs / 1000) : null,
+          active_duration_sec: s.activeApplicationDurationMs ? Math.round(s.activeApplicationDurationMs / 1000) : null,
+          total_errors: s.totalErrors || s.total_errors || 0,
+          quality_errors: score.errors,
+          would_reject: score.wouldReject,
+          attention_passed: attPassed,
+          last_page: s.last_page || '—',
+          excluded: excludePids.includes(s.prolific_pid),
+        };
+      }),
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1256,14 +1302,6 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 </style></head>
 <body>
 <h1>Sludge Experiment Dashboard</h1>
-
-<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
-  <label style="font-size:14px;font-weight:600;color:#856404;">Exclude participants (Prolific PIDs, comma-separated):</label><br>
-  <input id="exclude-input" type="text" placeholder="e.g. 5cf101ea..., 65b901e6..." style="width:70%;padding:6px 10px;margin-top:6px;border:1px solid #ccc;border-radius:4px;font-size:13px;font-family:monospace">
-  <button id="exclude-btn" style="padding:6px 16px;margin-left:8px;background:#1d70b8;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px">Apply</button>
-  <button id="exclude-clear" style="padding:6px 12px;margin-left:4px;background:#f3f2f1;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:13px">Clear</button>
-  <span id="exclude-status" style="margin-left:12px;font-size:12px;color:#505a5f"></span>
-</div>
 
 <h2>Participation</h2>
 <div id="participation" class="stats-grid"></div>
@@ -1341,7 +1379,7 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 <h2>Per-Page Breakdown</h2>
 <p class="help">Timing and <strong>validation errors</strong> per page. Validation errors = formatting issues caught by the form (missing fields, wrong format). These are different from quality errors above.</p>
 <table id="page-table">
-  <thead><tr><th>Page</th><th>Avg Time</th><th>N</th><th>Avg Val. Errors</th><th>% with Val. Errors</th></tr></thead>
+  <thead><tr><th>Page</th><th>Avg Time</th><th>Avg Active</th><th>N</th><th>Avg Val. Errors</th><th>% with Val. Errors</th></tr></thead>
   <tbody></tbody>
 </table>
 
@@ -1364,6 +1402,24 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 <div id="attention-failed-section" style="display:none;">
 <table id="attention-table">
   <thead><tr><th>Prolific PID</th><th>Condition</th><th>Answer Given</th><th>Status</th></tr></thead>
+  <tbody></tbody>
+</table>
+</div>
+
+<h2>Participant Data</h2>
+<p class="help">Interactive table showing all sessions. Tick rows to exclude participants from all calculations above. You can also type Prolific PIDs directly.</p>
+<div style="margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+  <input id="exclude-input" type="text" placeholder="Prolific PIDs to exclude (comma-separated)" style="flex:1;min-width:300px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:13px;font-family:monospace">
+  <button id="exclude-btn" style="padding:6px 16px;background:#1d70b8;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px">Apply</button>
+  <button id="exclude-clear" style="padding:6px 12px;background:#f3f2f1;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:13px">Clear</button>
+  <span id="exclude-status" style="font-size:12px;color:#505a5f"></span>
+</div>
+<div style="max-height:500px;overflow-y:auto;border:1px solid #dee2e6;border-radius:8px;">
+<table id="participant-table" style="font-size:12px;margin:0;">
+  <thead style="position:sticky;top:0;background:white;z-index:1;"><tr>
+    <th style="width:30px"><input type="checkbox" id="select-all-chk" title="Select/deselect all"></th>
+    <th>Prolific PID</th><th>Condition</th><th>Status</th><th>App Time</th><th>Active Time</th><th>Errors</th><th>Quality</th><th>Attention</th><th>Last Page</th>
+  </tr></thead>
   <tbody></tbody>
 </table>
 </div>
@@ -1497,7 +1553,9 @@ fetch('/api/stats?key='+K+(excludeQ||'')).then(r=>r.json()).then(s=>{
   document.getElementById('timing-legend').innerHTML =
     '<p style="margin:0 0 8px;font-size:13px;color:#505a5f">All timing and behaviour metrics are computed from <strong>exploitable sessions</strong> ('+exploit+' sessions: Complete + Submitted — everyone who finished the procedure).</p>'+
     '<dl>'+
-    '<dt>Procedure Time</dt><dd> — time from the first form page (Applicant details) to clicking "Submit application". This is the core task duration.</dd>'+
+    '<dt>Procedure Time</dt><dd> — wall-clock time from the first form page (Applicant details) to clicking "Submit application". Includes time when the tab was hidden.</dd>'+
+    '<dt>Active Time</dt><dd> — procedure time minus time spent with the tab hidden or minimised. Measures actual on-task engagement.</dd>'+
+    '<dt>% Active</dt><dd> — active time as a percentage of procedure time. Low values suggest participants switched tabs or left the page during the task.</dd>'+
     '<dt>Total Time</dt><dd> — time from session start to session end, including consent, instructions, post-task questionnaires, and feedback.</dd>'+
     '<dt>Validation Errors</dt><dd> — formatting issues caught by the form during the procedure (e.g., missing required fields, invalid date format). These are <em>not</em> substantive quality errors.</dd>'+
     '<dt>Doc Time</dt><dd> — total time spent viewing reference documents (ID card, vehicle registration, etc.) in the document viewer.</dd>'+
@@ -1507,6 +1565,8 @@ fetch('/api/stats?key='+K+(excludeQ||'')).then(r=>r.json()).then(s=>{
   // Timing average cards (from exploitable sessions)
   document.getElementById('timing').innerHTML = [
     ['Avg Procedure Time', s.avg_task_duration_formatted, ''],
+    ['Avg Active Time', s.avg_active_task_duration_formatted || '—', ''],
+    ['% Active', (s.active_percent || 100) + '%', (s.active_percent || 100) < 80 ? 'amber' : ''],
     ['Avg Total Time', s.avg_total_duration_formatted, ''],
     ['Avg Validation Errors', s.avg_errors, ''],
     ['Avg Doc Time', s.avg_doc_time_formatted, ''],
@@ -1516,6 +1576,7 @@ fetch('/api/stats?key='+K+(excludeQ||'')).then(r=>r.json()).then(s=>{
   // Timing median cards
   document.getElementById('timing-medians').innerHTML = [
     ['Mdn Procedure Time', s.median_task_duration_formatted || '—', 'muted'],
+    ['Mdn Active Time', s.median_active_task_duration_formatted || '—', 'muted'],
     ['Mdn Total Time', s.median_total_duration_formatted || '—', 'muted'],
     ['Mdn Validation Errors', s.median_errors != null ? s.median_errors : '—', 'muted'],
     ['Mdn Doc Time', s.median_doc_time_formatted || '—', 'muted'],
@@ -1617,15 +1678,15 @@ fetch('/api/stats?key='+K+(excludeQ||'')).then(r=>r.json()).then(s=>{
   pages.forEach(p => {
     const sec = SECTIONS[p.pageName] || 'Other';
     if (sec !== lastSection) {
-      tableHtml += '<tr class="section-header"><td colspan="5">'+sec+'</td></tr>';
+      tableHtml += '<tr class="section-header"><td colspan="6">'+sec+'</td></tr>';
       lastSection = sec;
     }
     const errCols = p.hasErrors
       ? '<td class="num">'+p.avgErrors+'</td><td class="num">'+p.errorRate+'%</td>'
       : '<td class="num" style="color:#b1b4b6">&mdash;</td><td class="num" style="color:#b1b4b6">&mdash;</td>';
-    tableHtml += '<tr><td>'+p.pageName+'</td><td class="num">'+p.avgTimeFormatted+'</td><td class="num">'+p.n+'</td>'+errCols+'</tr>';
+    tableHtml += '<tr><td>'+p.pageName+'</td><td class="num">'+p.avgTimeFormatted+'</td><td class="num">'+(p.avgActiveTimeFormatted||'—')+'</td><td class="num">'+p.n+'</td>'+errCols+'</tr>';
   });
-  document.querySelector('#page-table tbody').innerHTML = tableHtml || '<tr><td colspan="5">No data yet</td></tr>';
+  document.querySelector('#page-table tbody').innerHTML = tableHtml || '<tr><td colspan="6">No data yet</td></tr>';
 
   // Document table
   const ds = s.doc_stats || [];
@@ -1756,8 +1817,56 @@ fetch('/api/stats?key='+K+(excludeQ||'')).then(r=>r.json()).then(s=>{
     const pct = Math.round(d.count/maxDrop*100);
     return '<tr><td>'+d.pageName+'</td><td class="num">'+d.count+'</td><td><span class="bar bar--red" style="width:'+pct+'%">&nbsp;</span></td></tr>';
   }).join('') || '<tr><td colspan="3">No drop-offs recorded</td></tr>';
+
+  // ── Participant data table ──
+  var participants = s.participants || [];
+  var excludedPids = new Set((getExcludeParam() || '').split(',').map(function(p){return p.trim()}).filter(Boolean));
+  var tbody = document.querySelector('#participant-table tbody');
+  var fmtSec = function(sec) { if (!sec) return '—'; var m = Math.floor(sec/60); return m > 0 ? m+'m '+sec%60+'s' : sec+'s'; };
+  tbody.innerHTML = participants.map(function(p) {
+    var isExcl = excludedPids.has(p.prolific_pid);
+    var statusColor = p.completion_status === 'complete' ? '#00703c' : p.completion_status === 'submitted' ? '#1d70b8' : p.completion_status === 'ineligible' ? '#f47738' : p.completion_status === 'dropped' ? '#f47738' : '#d4351c';
+    var qualityLabel = p.would_reject ? '<span style="color:#d4351c">Reject ('+p.quality_errors+')</span>' : '<span style="color:#00703c">Pass</span>';
+    if (p.completion_status !== 'complete' && p.completion_status !== 'submitted') qualityLabel = '—';
+    var attLabel = p.attention_passed ? '<span style="color:#00703c">Pass</span>' : '<span style="color:#d4351c">Fail</span>';
+    if (p.completion_status !== 'complete' && p.completion_status !== 'submitted') attLabel = '—';
+    return '<tr style="'+(isExcl?'background:#fff3cd;opacity:0.7;':'')+'cursor:pointer" data-pid="'+p.prolific_pid+'">' +
+      '<td><input type="checkbox" class="excl-chk" data-pid="'+p.prolific_pid+'"'+(isExcl?' checked':'')+'></td>' +
+      '<td><code style="font-size:11px">'+p.prolific_pid+'</code></td>' +
+      '<td>'+p.condition+'</td>' +
+      '<td><span style="color:'+statusColor+';font-weight:600">'+p.completion_status+'</span></td>' +
+      '<td class="num">'+fmtSec(p.app_duration_sec)+'</td>' +
+      '<td class="num">'+fmtSec(p.active_duration_sec)+'</td>' +
+      '<td class="num">'+p.total_errors+'</td>' +
+      '<td>'+qualityLabel+'</td>' +
+      '<td>'+attLabel+'</td>' +
+      '<td style="font-size:11px">'+p.last_page+'</td>' +
+      '</tr>';
+  }).join('');
+  // Wire up checkbox clicks to update exclusion
+  document.querySelectorAll('.excl-chk').forEach(function(chk) {
+    chk.addEventListener('change', function() {
+      syncExcludeFromCheckboxes();
+      loadDashboard();
+    });
+  });
+  // Select-all checkbox
+  document.getElementById('select-all-chk').checked = false;
+  document.getElementById('select-all-chk').onchange = null;
 });
 } // end fetchStats
+
+function syncExcludeFromCheckboxes() {
+  var pids = [];
+  document.querySelectorAll('.excl-chk:checked').forEach(function(chk) { pids.push(chk.dataset.pid); });
+  excludeInput.value = pids.join(', ');
+}
+document.getElementById('select-all-chk').addEventListener('change', function() {
+  var checked = this.checked;
+  document.querySelectorAll('.excl-chk').forEach(function(chk) { chk.checked = checked; });
+  syncExcludeFromCheckboxes();
+  loadDashboard();
+});
 
 // Initial load
 loadDashboard();

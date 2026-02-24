@@ -90,8 +90,8 @@ Silently records everything researchers need:
 | **Document interactions** | Which docs opened, how long each was viewed, open/close events (both accordion panel and drawer) |
 | **Validation errors** | Error count per page, per field, total; which fields failed. **Accumulates across revisits** — errors from repeat visits are added to the running total. |
 | **Form responses** | All field values per page (stores the final values; overwritten on revisit) |
-| **Tab visibility** | When participant switches away from tab |
-| **Session summary** | Total duration, application-only duration, total doc time, total errors |
+| **Tab visibility & active time** | When participant switches away from tab. Per-page active time (visible in foreground) vs hidden time computed via `visibilitychange` API. Session-level `activeApplicationDurationMs` and `totalHiddenMs`. |
+| **Session summary** | Total duration, application-only duration, active application duration, total hidden time, total doc time, total errors |
 
 All data is **per-participant**: the dashboard and stats aggregate timing and error counts per session first, so each participant is counted once per page (not once per visit).
 
@@ -128,9 +128,9 @@ A fictional but realistic 19-page government application for a "Green Zone Vehic
   - `/api/export/{table}` — Individual table export (JSON or CSV with `&format=csv`)
 - **Ineligible session handling**: Sessions where the participant selected "not eligible" are flagged (`ineligible_skipped=yes` in CSV) and excluded from main timing averages
 - **Attention check report**: Dashboard section showing pass/fail count with a table of failed Prolific PIDs and their answers. Compares `attention_response` against "i pay attention" (case-insensitive, trimmed).
-- **Participant exclusion**: Dashboard accepts comma-separated Prolific PIDs to exclude from all calculations. Persists in URL for bookmarking/sharing.
-- **Quality bonus**: Instructions page shows a £0.50 bonus notice for submitting an error-free application (would be approved, no rejection errors).
-- **Dashboard**: `/dashboard` — Live stats with color-coded status cards (including ineligible count), application quality scoring section (rejection rate + per-field error table), page-by-page timing and validation error breakdown, document interaction rates, attention check report, drop-off analysis
+- **Participant exclusion**: Interactive data table in the dashboard showing all sessions with checkboxes. Tick rows to exclude participants from all calculations; stats reload in real time. Also supports manual PID entry. Exclusion persists in URL for bookmarking/sharing.
+- **Quality bonus**: Instructions page shows a £0.30 bonus notice for submitting an error-free application (would be approved, no rejection errors).
+- **Dashboard**: `/dashboard` — Live stats with color-coded status cards (including ineligible count), application quality scoring section (rejection rate + per-field error table), page-by-page timing and validation error breakdown, document interaction rates, attention check report, drop-off analysis, interactive participant data table
 - **Authentication**: All export/stats endpoints require `?key=research2025` (configurable via `EXPORT_KEY` env var)
 
 ---
@@ -157,8 +157,8 @@ A fictional but realistic 19-page government application for a "Green Zone Vehic
 
 The `/api/export/csv` endpoint produces **one row per session** with columns:
 
-- **Base**: `session_id`, `prolific_pid`, `study_id`, `condition_code`, `started_at`, `completed_at`, `totalDurationMs`, `totalErrors`, `totalDocTimeMs`, `totalDocOpens`
-- **Per-page timing**: `time_{pageId}_ms` for each page
+- **Base**: `session_id`, `prolific_pid`, `study_id`, `condition_code`, `started_at`, `completed_at`, `totalDurationMs`, `applicationDurationMs`, `activeApplicationDurationMs`, `totalHiddenMs`, `totalErrors`, `totalDocTimeMs`, `totalDocOpens`
+- **Per-page timing**: `time_{pageId}_ms` and `active_time_{pageId}_ms` for each page
 - **Per-document**: `doc_{docId}_opens`, `doc_{docId}_totalMs` for each document
 - **Per-page errors**: `errors_{pageId}` for each page
 - **Application quality scoring**: `quality_errors` (count of substantive errors), `quality_would_reject` (`yes`/`no`), `quality_error_fields` (semicolon-separated list), `quality_error_details` (submitted vs. expected for each error), `ineligible_skipped` (`yes`/`no`)

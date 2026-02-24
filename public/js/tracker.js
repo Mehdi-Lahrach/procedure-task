@@ -44,7 +44,9 @@ class SludgeTracker {
     this.sessionStartTime = null;
     this.sessionEndTime = null;
 
-    // ── Tab visibility ──
+    // ── Tab visibility / active time ──
+    this._hiddenSince = null;         // timestamp when tab became hidden (null if visible)
+    this._currentPageHiddenMs = 0;    // accumulated hidden time for current page
     this._setupVisibilityTracking();
   }
 
@@ -257,6 +259,8 @@ class SludgeTracker {
     if (this.currentPageEntry) {
       this.exitPage();
     }
+    this._currentPageHiddenMs = 0;
+    this._hiddenSince = document.hidden ? Date.now() : null;
     this.currentPageEntry = {
       pageId,
       pageIndex,
@@ -268,21 +272,33 @@ class SludgeTracker {
   exitPage() {
     if (!this.currentPageEntry) return;
     const exitTime = Date.now();
+    // If tab is currently hidden, flush the pending hidden time
+    if (this._hiddenSince) {
+      this._currentPageHiddenMs += (exitTime - this._hiddenSince);
+      this._hiddenSince = null;
+    }
+    const durationMs = exitTime - this.currentPageEntry.enterTime;
+    const activeTimeMs = Math.max(0, durationMs - this._currentPageHiddenMs);
     const timing = {
       pageId: this.currentPageEntry.pageId,
       pageIndex: this.currentPageEntry.pageIndex,
       enterTime: this.currentPageEntry.enterTime,
       exitTime,
-      durationMs: exitTime - this.currentPageEntry.enterTime,
+      durationMs,
+      activeTimeMs,
+      hiddenTimeMs: this._currentPageHiddenMs,
     };
     this.pageTimings.push(timing);
     this._pushEvent('page_exit', {
       pageId: timing.pageId,
       pageIndex: timing.pageIndex,
       durationMs: timing.durationMs,
+      activeTimeMs: timing.activeTimeMs,
+      hiddenTimeMs: timing.hiddenTimeMs,
     });
     this._closeAllOpenDocs();
     this.currentPageEntry = null;
+    this._currentPageHiddenMs = 0;
   }
 
   // ============================================================
@@ -392,13 +408,16 @@ class SludgeTracker {
     const nonAppPages = ['consent', 'instructions', 'confirm_instructions',
       'application_submitted', 'demographics', 'attention_check',
       'feedback', 'debrief', 'completion'];
-    const applicationDurationMs = this.pageTimings
-      .filter(t => !nonAppPages.includes(t.pageId))
-      .reduce((sum, t) => sum + t.durationMs, 0);
+    const appTimings = this.pageTimings.filter(t => !nonAppPages.includes(t.pageId));
+    const applicationDurationMs = appTimings.reduce((sum, t) => sum + t.durationMs, 0);
+    const activeApplicationDurationMs = appTimings.reduce((sum, t) => sum + (t.activeTimeMs || t.durationMs), 0);
+    const totalHiddenMs = this.pageTimings.reduce((sum, t) => sum + (t.hiddenTimeMs || 0), 0);
 
     const summary = {
       totalDurationMs,
       applicationDurationMs,
+      activeApplicationDurationMs,
+      totalHiddenMs,
       totalErrors: this.totalErrors,
       errorsByPage: this.errorCountsByPage,
       errorsByField: this.errorCountsByField,
@@ -420,6 +439,8 @@ class SludgeTracker {
           session_id: this.sessionId,
           totalDurationMs: summary.totalDurationMs,
           applicationDurationMs: summary.applicationDurationMs,
+          activeApplicationDurationMs: summary.activeApplicationDurationMs,
+          totalHiddenMs: summary.totalHiddenMs,
           totalDocTimeMs: summary.totalDocTimeMs,
           totalDocOpens: summary.totalDocOpens,
           totalErrors: summary.totalErrors,
@@ -443,6 +464,17 @@ class SludgeTracker {
 
   _setupVisibilityTracking() {
     document.addEventListener('visibilitychange', () => {
+      const now = Date.now();
+      if (document.hidden) {
+        // Tab just became hidden — start tracking hidden time
+        this._hiddenSince = now;
+      } else {
+        // Tab just became visible — accumulate hidden duration
+        if (this._hiddenSince) {
+          this._currentPageHiddenMs += (now - this._hiddenSince);
+          this._hiddenSince = null;
+        }
+      }
       this._pushEvent('visibility_change', {
         hidden: document.hidden,
         pageId: this.currentPageEntry?.pageId || 'unknown',
