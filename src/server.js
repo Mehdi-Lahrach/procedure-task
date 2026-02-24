@@ -1239,6 +1239,54 @@ app.get('/api/stats', checkKey, (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// --- List sessions ---
+app.get('/api/list-sessions', checkKey, (req, res) => {
+  const sessions = readJsonl('sessions.jsonl');
+  res.json(sessions.map(s => ({
+    session_id: s.session_id,
+    prolific_pid: s.prolific_pid,
+    completion_status: s.completion_status,
+    completed_at: s.completed_at || null,
+  })));
+});
+
+// --- Bulk import sessions ---
+app.post('/api/import-sessions', checkKey, (req, res) => {
+  try {
+    const { sessions } = req.body;
+    if (!Array.isArray(sessions) || sessions.length === 0)
+      return res.status(400).json({ error: 'sessions array required' });
+    const filepath = path.join(DATA_DIR, 'sessions.jsonl');
+    const lines = sessions.map(s => JSON.stringify({ ...s, _written_at: new Date().toISOString() }));
+    fs.writeFileSync(filepath, lines.join('\n') + '\n', 'utf8');
+    console.log(`  [IMPORT] ${sessions.length} sessions restored`);
+    res.json({ success: true, imported: sessions.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- Remove participant by prolific_pid ---
+app.get('/api/remove-participant', checkKey, (req, res) => {
+  try {
+    const { pid } = req.query;
+    if (!pid) return res.status(400).json({ error: 'pid query param required' });
+    const sessions = readJsonl('sessions.jsonl');
+    const toRemove = sessions.filter(s => s.prolific_pid === pid);
+    if (toRemove.length === 0) return res.status(404).json({ error: 'No sessions found for that prolific_pid' });
+    const sessionIds = new Set(toRemove.map(s => s.session_id));
+    const filtered = sessions.filter(s => s.prolific_pid !== pid);
+    const sessionsPath = path.join(DATA_DIR, 'sessions.jsonl');
+    fs.writeFileSync(sessionsPath, filtered.map(s => JSON.stringify(s)).join('\n') + (filtered.length ? '\n' : ''), 'utf8');
+    ['navigation_events.jsonl', 'misc_events.jsonl', 'sessions_updates.jsonl'].forEach(filename => {
+      const filepath = path.join(DATA_DIR, filename);
+      if (!fs.existsSync(filepath)) return;
+      const records = readJsonl(filename);
+      const filteredRecords = records.filter(r => !sessionIds.has(r.session_id));
+      fs.writeFileSync(filepath, filteredRecords.map(r => JSON.stringify(r)).join('\n') + (filteredRecords.length ? '\n' : ''), 'utf8');
+    });
+    res.json({ success: true, removed_sessions: toRemove.length, session_ids: [...sessionIds] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- Delete all data (piloting) ---
 app.post('/api/delete-all-data', checkKey, (req, res) => {
   try {
